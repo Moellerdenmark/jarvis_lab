@@ -1,4 +1,3 @@
 tools/models/*
 !tools/models/**/*.bin
 !tools/models/.gitkeep
-!tools/models/README.md
