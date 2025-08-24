@@ -1,3 +1,5 @@
-tools/models/
-*.bin
-*.wav
+__tools__/
+queue/
+tools/hello*.ps1
+tools/rt_*.ps1
+tools/fil.ps1
