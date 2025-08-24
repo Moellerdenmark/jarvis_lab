@@ -1,2 +1,2 @@
 tools/models/*
-!tools/models/README.md
+!tools/models/.gitkeep
