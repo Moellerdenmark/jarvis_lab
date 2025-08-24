@@ -1,0 +1,44 @@
+param(
+  [Parameter(Mandatory=$true)][string]$Text,
+  [string]$Voice = $null,
+  [int]$Rate = 0,      # -10..10
+  [int]$Volume = 100,  # 0..100
+  [string]$OutWav = $null,   # valgfrit: gem til WAV
+  [switch]$Play               # afspil WAV efter gem
+)
+
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Speech
+
+$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+try {
+  if ($Voice) { $synth.SelectVoice($Voice) }  # brug fx Get-InstalledVoices()
+} catch { }
+
+$synth.Rate = [Math]::Max(-10, [Math]::Min(10, $Rate))
+$synth.Volume = [Math]::Max(0, [Math]::Min(100, $Volume))
+
+if ($OutWav) {
+  # Tal til WAV-fil
+  $dir = Split-Path -Parent $OutWav
+  if ($dir) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+  $synth.SetOutputToWaveFile($OutWav)
+  $synth.Speak($Text)
+  $synth.SetOutputToDefaultAudioDevice()
+  Write-Host ("[TTS] WAV skrevet: {0}" -f $OutWav) -ForegroundColor DarkGray
+
+  if ($Play) {
+    # Brug ffplay hvis muligt (bedre kompatibilitet), ellers .NET SoundPlayer
+    $ff = (Get-Command ffplay -ErrorAction SilentlyContinue)?.Source
+    if ($ff) {
+      & $ff -hide_banner -autoexit -nodisp -loglevel error $OutWav
+    } else {
+      $player = New-Object System.Media.SoundPlayer($OutWav)
+      $player.PlaySync()
+    }
+  }
+} else {
+  # Tal direkte ud af højtaleren
+  $synth.SetOutputToDefaultAudioDevice()
+  $synth.Speak($Text)
+}

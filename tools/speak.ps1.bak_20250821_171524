@@ -1,0 +1,14 @@
+param(
+  [string]$Text = "Hej, jeg er Jarvis og jeg taler dansk."
+)
+
+$Root     = "C:\Users\gubbi\jarvis_core"
+$PiperExe = Join-Path $Root "piper\piper.exe"
+$VoiceDir = Join-Path $Root "piper\voices"
+$OutWav   = Join-Path $Root "out.wav"
+
+# Kør Piper
+$Text | & $PiperExe -m "$VoiceDir\da_DK-medium.onnx" -c "$VoiceDir\da_DK-medium.onnx.json" --output_file $OutWav
+
+# Afspil
+Start-Process $OutWav

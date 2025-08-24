@@ -1,0 +1,158 @@
+param(
+  [string]$Text,
+  [switch]$SpeakBack
+)
+
+# == el-liste router ==
+try {
+  if ($Text -imatch '^\s*el-liste\s*:\s*(.+)$') {
+    if (-not (Get-Command Invoke-ElListe -EA SilentlyContinue)) {
+      $skillPath = Join-Path (Join-Path $PSScriptRoot 'tools') 'skills\el-liste.ps1'
+      if (Test-Path $skillPath) { . $skillPath }
+    }
+    $bul = $Matches[1]
+    $ans = Invoke-ElListe -Bullets $bul
+    $ans | Write-Output
+    return
+  }
+} catch { Write-Warning "el-liste fejlede: $($_.Exception.Message)" }
+# == /el-liste router ==
+. "C:\Users\gubbi\jarvis_core\tools\wrappers.ps1"
+
+if ($Text -match '^\s*spørg\s+(?:jarvis|chatgpt)\s+og\s+læs:\s*(.+)$') {
+  $q = $Matches[1]
+
+  # Vælg mini/pro afhængigt af længde
+  $ans = if ($q.Length -lt 120) { askdk_mini $q } else { askdk_pro $q }
+
+  if ($SpeakBack) {
+    try {
+      Add-Type -AssemblyName System.Speech
+      $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+      $s.Rate = 0; $s.Volume = 100
+      $s.Speak($ans)
+    } catch {
+      Write-Warning "TTS fejlede: $($_.Exception.Message)"
+    }
+  }
+
+  $ans
+  return
+}
+
+# Fallback: send hele $Text til mini
+askdk_mini $Text
+
+# router test
+# router test
+# == el-sum router ==
+try {
+  if ($Text -imatch '^\s*el-sum\s*:\s*(.+)$') {
+    if (-not (Get-Command Invoke-ElSum -EA SilentlyContinue)) {
+      $skillPath = Join-Path (Join-Path $PSScriptRoot 'tools') 'skills\el-sum.ps1'
+      if (Test-Path $skillPath) { . $skillPath }
+    }
+    $blob = $Matches[1]
+    $ans  = Invoke-ElSum -Text $blob
+    $ans | Write-Output
+    return
+  }
+} catch { Write-Warning "el-sum fejlede: $($_.Exception.Message)" }
+# == /el-sum router ==
+) {
+    if (-not (Get-Command Invoke-ElSum -EA SilentlyContinue)) {
+       = Join-Path (Join-Path  'tools') 'skills\el-sum.ps1'
+      if (Test-Path ) { .  }
+    }
+     = [1]
+    Her er tre konkrete idéer til LED-lys i en 18 m² garage:
+
+1. **Taglyslampen**: En bred, lysstærk LED-taglyse kan indsættes i taget for at give en god lysforrentning over hele garagen. Dette gør det muligt at arbejde eller lege på stedet uden at skulle bruge andre lyskilder.
+2. **Væggelementer**: Indsæt LED-lamper i væggelementerne, såsom skabsskabe eller arbejdsbord, for at give en god lysforrentning nær arbejdsområdet. Dette gør det muligt at se godt på detaljer og arbejde uden at skulle bruge andre lyskilder.
+3. **Gulvlys**: En bred, lysstærk LED-gulvlyse kan indsættes langs gulvet for at give en god lysforrentning over hele garagen. Dette gør det muligt at se godt på stedet og bevæge sig uden at skulle bruge andre lyskilder.
+
+Disse idéer giver en god lysforrentning og kan hjælpe til at skabe et mere komfortabelt arbejds- eller lejemiljø i garagen.
+  = Invoke-ElSum -Text 
+    Her er tre konkrete idéer til LED-lys i en 18 m² garage:
+
+1. **Taglyslampen**: En bred, lysstærk LED-taglyse kan indsættes i taget for at give en god lysforrentning over hele garagen. Dette gør det muligt at arbejde eller lege på stedet uden at skulle bruge andre lyskilder.
+2. **Væggelementer**: Indsæt LED-lamper i væggelementerne, såsom skabsskabe eller arbejdsbord, for at give en god lysforrentning nær arbejdsområdet. Dette gør det muligt at se godt på detaljer og arbejde uden at skulle bruge andre lyskilder.
+3. **Gulvlys**: En bred, lysstærk LED-gulvlyse kan indsættes langs gulvet for at give en god lysforrentning over hele garagen. Dette gør det muligt at se godt på stedet og bevæge sig uden at skulle bruge andre lyskilder.
+
+Disse idéer giver en god lysforrentning og kan hjælpe til at skabe et mere komfortabelt arbejds- eller lejemiljø i garagen.
+ | Write-Output
+    return
+  }
+} catch { Write-Warning "el-sum fejlede: " }
+# == /el-sum router ==
+) {
+    if (-not (Get-Command Invoke-ElListe -EA SilentlyContinue)) {
+       = Join-Path (Join-Path  'tools') 'skills\el-liste.ps1'
+      if (Test-Path ) { .  }
+    }
+     = [1]
+    Her er tre konkrete idéer til LED-lys i en 18 m² garage:
+
+1. **Taglyslampen**: En bred, lysstærk LED-taglyse kan indsættes i taget for at give en god lysforrentning over hele garagen. Dette gør det muligt at arbejde eller lege på stedet uden at skulle bruge andre lyskilder.
+2. **Væggelementer**: Indsæt LED-lamper i væggelementerne, såsom skabsskabe eller arbejdsbord, for at give en god lysforrentning nær arbejdsområdet. Dette gør det muligt at se godt på detaljer og arbejde uden at skulle bruge andre lyskilder.
+3. **Gulvlys**: En bred, lysstærk LED-gulvlyse kan indsættes langs gulvet for at give en god lysforrentning over hele garagen. Dette gør det muligt at se godt på stedet og bevæge sig uden at skulle bruge andre lyskilder.
+
+Disse idéer giver en god lysforrentning og kan hjælpe til at skabe et mere komfortabelt arbejds- eller lejemiljø i garagen.
+ = Invoke-ElListe -Bullets 
+    Her er tre konkrete idéer til LED-lys i en 18 m² garage:
+
+1. **Taglyslampen**: En bred, lysstærk LED-taglyse kan indsættes i taget for at give en god lysforrentning over hele garagen. Dette gør det muligt at arbejde eller lege på stedet uden at skulle bruge andre lyskilder.
+2. **Væggelementer**: Indsæt LED-lamper i væggelementerne, såsom skabsskabe eller arbejdsbord, for at give en god lysforrentning nær arbejdsområdet. Dette gør det muligt at se godt på detaljer og arbejde uden at skulle bruge andre lyskilder.
+3. **Gulvlys**: En bred, lysstærk LED-gulvlyse kan indsættes langs gulvet for at give en god lysforrentning over hele garagen. Dette gør det muligt at se godt på stedet og bevæge sig uden at skulle bruge andre lyskilder.
+
+Disse idéer giver en god lysforrentning og kan hjælpe til at skabe et mere komfortabelt arbejds- eller lejemiljø i garagen.
+ | Write-Output
+    return
+  }
+} catch { Write-Warning "el-liste fejlede: " }
+# == /el-liste router ==
+. "C:\Users\gubbi\jarvis_core\tools\wrappers.ps1"
+
+if ($Text -match '^\s*spørg\s+(?:jarvis|chatgpt)\s+og\s+læs:\s*(.+)$') {
+  $q = $Matches[1]
+
+  # Vælg mini/pro afhængigt af længde
+  $ans = if ($q.Length -lt 120) { askdk_mini $q } else { askdk_pro $q }
+
+  if ($SpeakBack) {
+    try {
+      Add-Type -AssemblyName System.Speech
+      $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+      $s.Rate = 0; $s.Volume = 100
+      $s.Speak($ans)
+    } catch {
+      Write-Warning "TTS fejlede: $($_.Exception.Message)"
+    }
+  }
+
+  $ans
+  return
+}
+
+# Fallback: send hele $Text til mini
+askdk_mini $Text
+
+# router test
+# router test
+# == el-sum router ==
+try {
+  if ($Text -imatch '^\s*el-sum\s*:\s*(.+)$') {
+    if (-not (Get-Command Invoke-ElSum -EA SilentlyContinue)) {
+      $skillPath = Join-Path (Join-Path $PSScriptRoot 'tools') 'skills\el-sum.ps1'
+      if (Test-Path $skillPath) { . $skillPath }
+    }
+    $blob = $Matches[1]
+    $ans  = Invoke-ElSum -Text $blob
+    $ans | Write-Output
+    return
+  }
+} catch { Write-Warning "el-sum fejlede: $($_.Exception.Message)" }
+# == /el-sum router ==
+
+
+

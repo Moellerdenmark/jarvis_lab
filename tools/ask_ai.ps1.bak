@@ -1,0 +1,160 @@
+param(
+  [ValidateSet("webui","chatgpt","chatgpt_read","ollama")]
+  [string]$Provider = 'ollama',
+  [string]$Prompt = $null,   # chatgpt_read: maxWaitMs (tal), ellers 20000
+  [string]$Voice  = "Helle",
+  [switch]$SpeakBack
+)
+$ErrorActionPreference = "Stop"
+
+# --- TTS helper (falder tilbage til Write-Host hvis speak_busy.ps1 mangler) ---
+$ScriptDir = if($PSScriptRoot){ $PSScriptRoot } else { Split-Path -Parent $PSCommandPath }
+function Say($t){
+  $s = Join-Path $ScriptDir 'speak_busy.ps1'
+  if(Test-Path $s){ & $s -Text $t -Voice $Voice -Rate 1 } else { Write-Host $t }
+}
+function Ensure-Prompt([string]$current){
+  if ($current -and $current.Trim()){ return $current }
+  try { $current = Get-Clipboard } catch {}
+  if (-not $current -or -not $current.Trim()) {
+    $msg = "[ask_ai] Mangler -Prompt og Clipboard er tomt. Afbryder."
+    if($SpeakBack){ Say($msg) } else { Write-Host $msg -ForegroundColor Red }
+    return $null
+  }
+  return $current
+}
+
+# --- Chrome + CDP helpers ---
+Add-Type -AssemblyName System.Windows.Forms | Out-Null
+if (-not ([System.Management.Automation.PSTypeName]'Win32.Native').Type) {
+  Add-Type -Namespace Win32 -Name Native -MemberDefinition @"
+    [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool SetForegroundWindow(System.IntPtr hWnd);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ShowWindowAsync(System.IntPtr hWnd, int nCmdShow);
+"@ | Out-Null
+}
+$CdpPort    = 9222
+$ProfileDir = Join-Path $env:LOCALAPPDATA 'JarvisChrome\Profile'
+
+function Get-ChromePath{
+  $candidates = @(
+    "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+    "$env:ProgramFiles(x86)\Google\Chrome\Application\chrome.exe",
+    "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
+  )
+  foreach($p in $candidates){ if(Test-Path $p){ return $p } }
+  return $null
+}
+function Focus-WindowByTitle([string]$pattern,[int]$timeoutMs=12000){
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  while($sw.ElapsedMilliseconds -lt $timeoutMs){
+    $procs = Get-Process -Name chrome -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }
+    $hit = $procs | Where-Object { $_.MainWindowTitle -match $pattern } | Select-Object -First 1
+    if(-not $hit){ $hit = $procs | Select-Object -First 1 }
+    if($hit){
+      [Win32.Native]::ShowWindowAsync($hit.MainWindowHandle, 9) | Out-Null
+      Start-Sleep -Milliseconds 120
+      [Win32.Native]::SetForegroundWindow($hit.MainWindowHandle) | Out-Null
+      Start-Sleep -Milliseconds 120
+      return $true
+    }
+    Start-Sleep -Milliseconds 200
+  }
+  return $false
+}
+function Launch-Chrome([string]$url,[string]$titlePattern){
+  $exe = Get-ChromePath
+  if(-not $exe){ throw "Chrome blev ikke fundet." }
+  if(-not (Test-Path $ProfileDir)){ New-Item -ItemType Directory -Force -Path $ProfileDir | Out-Null }
+  Start-Process -FilePath $exe -ArgumentList @("--remote-debugging-port=$CdpPort","--user-data-dir=$ProfileDir","--new-window",$url) | Out-Null
+  [void](Focus-WindowByTitle $titlePattern 15000)
+}
+function Get-CdpPageWsUrl([string]$urlPattern='chatgpt\.com|chat\.openai\.com'){
+  try{
+    $targets = Invoke-RestMethod -Uri ("http://127.0.0.1:{0}/json" -f $CdpPort) -TimeoutSec 2
+  }catch{
+    throw "Ingen CDP på port $CdpPort. Start Chrome med --remote-debugging-port=$CdpPort."
+  }
+  $t = $targets | Where-Object { $_.type -eq 'page' -and $_.url -match $urlPattern } | Select-Object -First 1
+  if(-not $t){ throw "Ingen fane matcher ($urlPattern). Åbn ChatGPT i profilen." }
+  return $t.webSocketDebuggerUrl
+}
+
+# --- Minimal CDP-klient (WebSocket) ---
+$script:cdpReqId = 1
+function Invoke-Cdp {
+  param([string]$WsUrl,[string]$Method,[hashtable]$Params)
+  $ws  = [System.Net.WebSockets.ClientWebSocket]::new()
+  $uri = [Uri]$WsUrl
+  $ws.ConnectAsync($uri,[Threading.CancellationToken]::None).Wait()
+  try{
+    $id = [Threading.Interlocked]::Increment([ref]$script:cdpReqId)
+    $payload = @{ id = $id; method = $Method; params = $Params } | ConvertTo-Json -Depth 8
+    $bytes = [Text.Encoding]::UTF8.GetBytes($payload)
+    $seg   = [ArraySegment[byte]]::new($bytes)
+    $ws.SendAsync($seg, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, [Threading.CancellationToken]::None).Wait()
+    $buf = New-Object byte[] 32768
+    $ms  = New-Object System.IO.MemoryStream
+    while($true){
+      $res = $ws.ReceiveAsync([ArraySegment[byte]]::new($buf), [Threading.CancellationToken]::None).Result
+      $ms.Write($buf,0,$res.Count)
+      if($res.EndOfMessage){ break }
+    }
+    $json = [Text.Encoding]::UTF8.GetString($ms.ToArray())
+    try{ return ($json | ConvertFrom-Json) }catch{ throw "CDP svar kunne ikke parses: $json" }
+  }finally{
+    $ws.Dispose()
+  }
+}
+
+function ChatGPT-SendViaCDP([string]$text){
+  $text = Ensure-Prompt $text
+  if(-not $text){ return $false }
+  try { Get-CdpPageWsUrl | Out-Null } catch { Launch-Chrome 'https://chatgpt.com/' 'ChatGPT|OpenAI|Chrome' }
+  $wsUrl = Get-CdpPageWsUrl
+  Invoke-Cdp -WsUrl $wsUrl -Method 'Runtime.enable' -Params @{} | Out-Null
+  $jsonText = ($text | ConvertTo-Json -Depth 4)
+  $expr = @"
+(() => {
+  const p = $jsonText;
+  const ta = document.querySelector('textarea');
+  if(!ta){ return 'NO_TEXTAREA'; }
+  ta.focus();
+  ta.value = p;
+  ta.dispatchEvent(new Event('input', {bubbles:true}));
+  const btn = document.querySelector('[data-testid="send-button"], button[aria-label*="Send"]');
+  if(btn){ btn.click(); return 'CLICKED'; }
+  const e = new KeyboardEvent('keydown', {key:'Enter', code:'Enter', keyCode:13, which:13, bubbles:true});
+  ta.dispatchEvent(e);
+  return 'SENT';
+})()
+"@
+  [void](Invoke-Cdp -WsUrl $wsUrl -Method 'Runtime.evaluate' -Params @{ expression=$expr; returnByValue=$true })
+  if($SpeakBack){ Say("Jeg sendte spørgsmålet til ChatGPT i Chrome.") }
+  return $true
+}
+
+function ChatGPT-ReadViaCDP([int]$maxWaitMs=20000){
+  try { Get-CdpPageWsUrl | Out-Null } catch { Launch-Chrome 'https://chatgpt.com/' 'ChatGPT|OpenAI|Chrome' }
+  $wsUrl = Get-CdpPageWsUrl
+  Invoke-Cdp -WsUrl $wsUrl -Method 'Runtime.enable' -Params @{} | Out-Null
+  $expr = @'
+(() => {
+  function getText(){
+    const sels = [
+      '[data-message-author-role="assistant"]',
+      'div[data-testid="assistant-message"]',
+      'article:has([data-message-author-role="assistant"])',
+      '.markdown'
+    ];
+    let nodes=[];
+    for(const s of sels){
+      const list = document.querySelectorAll(s);
+      if(list && list.length){ nodes = Array.from(list); if(nodes.length) break; }
+    }
+    if(!nodes.length) return '';
+    const last = nodes[nodes.length-1];
+    const txt = (last.innerText || last.textContent || '').trim();
+    return txt;
+  }
+  return getText();
+})()

@@ -1,0 +1,901 @@
+param(
+  [string]$Root         = "C:\Users\gubbi\jarvis_core",
+  [string]$AiCmd        = "C:\Users\gubbi\jarvis_core\tools\ai.ps1",
+  [string]$TtsCmd       = "C:\Users\gubbi\jarvis_core\tools\speak.ps1",
+  [string]$SttCmd       = "C:\Users\gubbi\jarvis_core\tools\stt.ps1",
+  [string]$Voice        = "Jarvis",
+  [int]$Rate            = 0,
+  [int]$Volume          = 100,
+  [int]$AiTimeoutSec    = 15,
+  [int]$TtsTimeoutSec   = 10,
+  [int]$SttTimeoutSec   = 12,
+  [switch]$Test
+)
+
+
+
+# ==== Wakeword-regex (enkeltlinjet) ====
+$global:RE_WAKEWORD_ONLY = "^(?i)\s*(hej|hey)\s+jarvis\s*[?.!,:;\-]*\s*$"
+$global:RE_JARVIS_ONLY   = "^(?i)\s*jarvis\s*[?.!,:;\-]*\s*$"
+# ==== Wakeword-regex (enkeltlinjet, case-insensitive via (?i)) ====
+$global:RE_WAKEWORD_ONLY = "^(?i)\s*(hej|hey)\s+jarvis\s*[?.!,:;\-]*\s*$"
+$global:RE_JARVIS_ONLY   = "^(?i)\s*jarvis\s*[?.!,:;\-]*\s*$"
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+# paths
+$SttFile = Join-Path $Root "out\listen\last_stt.txt"
+
+# helpers
+function Get-PromptFromFile {
+  param([string]$Path)
+  if (-not (Test-Path $Path)) { return $null }
+  for ($i=0; $i -lt 3; $i++) {
+    try { return (Get-Content -LiteralPath $Path -Raw -ErrorAction Stop).Trim() }
+    catch { Start-Sleep -Milliseconds 80 }
+  }
+  return $null
+}
+
+function Get-LastNonEmptyLine {
+  param([string]$Text)
+  if (-not $Text) { return $null }
+  $lines = $Text -split "`r?`n"
+  for ($i = $lines.Length - 1; $i -ge 0; $i--) {
+    $ln = $lines[$i].Trim()
+    if ($ln) { return $ln }
+  }
+  return $null
+}
+
+function Normalize-Text {
+  param([string]$Text)
+  if (-not $Text) { return "" }
+  $t = $Text -replace '["''`]', ''
+  $t = ($t -replace '\s+', ' ').Trim()
+  return $t
+}
+
+# wakeword regex (ASCII only)
+$rxWake = [regex]::new('(?i)\b(?:hej|hey)\s+jarvis\b\s*[,.:;\-]*\s*(.*)$')
+$rxAny  = [regex]::new('(?i)\bjarvis\b\s*[,.:;\-]*\s*(.*)$')
+
+function Extract-Message {
+  param([string]$Prompt)
+  $norm = Normalize-Text $Prompt
+  if (-not $norm) { return $false, $null }
+
+  $m1 = $rxWake.Match($norm)
+  if ($m1.Success) {
+    $rest = $m1.Groups[1].Value.Trim()
+    if ($rest -match '^[\s\.\,\?\!\-\;\:]*$') { return $true, "" }
+    return $true, $rest
+  }
+
+  $m2 = $rxAny.Match($norm)
+  if ($m2.Success) {
+    $rest = $m2.Groups[1].Value.Trim()
+    if ($rest -match '^[\s\.\,\?\!\-\;\:]*$') { return $true, "" }
+    return $true, $rest
+  }
+
+  return $false, $null
+}
+
+function Invoke-WithTimeout {
+  param([scriptblock]$Script, [int]$TimeoutSec = 10)
+  $job = Start-Job -ScriptBlock $Script
+  try {
+    $ok = Wait-Job -Id $job.Id -Timeout $TimeoutSec
+    if (-not $ok) {
+      Stop-Job -Id $job.Id | Out-Null
+      Remove-Job -Id $job.Id | Out-Null
+      return $false, $null, "timeout"
+    }
+    $out = Receive-Job -Id $job.Id -ErrorAction Stop
+    Remove-Job -Id $job.Id | Out-Null
+    return $true, $out, $null
+  } catch {
+    try { Remove-Job -Id $job.Id | Out-Null } catch {}
+    return $false, $null, $_.Exception.Message
+  }
+}
+
+function Speak-Safe {
+  param([string]$Text, [string]$Voice, [int]$Rate, [int]$Volume, [int]$TimeoutSec)
+  if (-not (Test-Path $TtsCmd)) {
+    Write-Host "TTS(dummy): $Text" -ForegroundColor DarkGreen
+    return $true
+  }
+  try {
+    $sb = { & $using:TtsCmd -Text $using:Text -Voice $using:Voice -Rate $using:Rate -Volume $using:Volume }
+    $ok,$out,$err = Invoke-WithTimeout -Script $sb -TimeoutSec $TimeoutSec
+    if ($ok) {
+      Write-Host "TTS: done." -ForegroundColor DarkGreen
+      return $true
+    } else {
+      Write-Host "TTS error/timeout: $err" -ForegroundColor Yellow
+      Write-Host "TTS(dummy): $Text" -ForegroundColor DarkGreen
+      return $true
+    }
+  } catch {
+    Write-Host ("TTS exception: " + $_.Exception.Message) -ForegroundColor Yellow
+    Write-Host "TTS(dummy): $Text" -ForegroundColor DarkGreen
+    return $true
+  }
+}
+
+function AskAI-Safe {
+  param([string]$Msg, [int]$TimeoutSec)
+  if (-not (Test-Path $AiCmd)) { return "OK - I heard: $Msg" }
+  $sb = { & $using:AiCmd -Prompt $using:Msg }
+  $ok,$out,$err = Invoke-WithTimeout -Script $sb -TimeoutSec $TimeoutSec
+  if (-not $ok) { Write-Host "AI error/timeout: $err" -ForegroundColor Yellow; return $null }
+  return ($out | Out-String).Trim()
+}
+
+function Get-NextUtterance {
+  param([int]$TimeoutSec = 8)
+
+  if (-not (Test-Path $SttCmd)) {
+    Write-Host "STT path not found: $SttCmd" -ForegroundColor Red
+    return $null
+  }
+
+  # Kør STT én gang (optag + transskriber)
+  $sb = { & $using:SttCmd }
+  $ok,$out,$err = Invoke-WithTimeout -Script $sb -TimeoutSec $TimeoutSec
+  if (-not $ok) {
+    Write-Host "STT error/timeout: $err" -ForegroundColor Yellow
+    return $null
+  }
+
+  # Læs seneste tekst og vælg sidste linje, som IKKE kun er wakeword
+  $txt = if (Test-Path $SttFile) { Get-Content -LiteralPath $SttFile -Raw -ErrorAction SilentlyContinue } else { $null }
+  if (-not $txt) { return $null }
+
+  $lines = $txt -split "`r?`n"
+  for ($i = $lines.Length - 1; $i -ge 0; $i--) {
+    $ln = $lines[$i].Trim()
+    if (-not $ln) { continue }
+    if ($ln -match $global:RE_WAKEWORD_ONLY) { continue }
+    if ($ln -match $global:RE_JARVIS_ONLY)   { continue }
+    return $ln
+  }
+  return $null
+}
+
+  # K?r STT ?n gang (optag/transskriber)
+  $sb = { & $using:SttCmd }
+  $ok,$out,$err = Invoke-WithTimeout -Script $sb -TimeoutSec $TimeoutSec
+  if (-not $ok) { Write-Host "STT error/timeout: $err" -ForegroundColor Yellow; return $null }
+
+  # L?s hele filen og v?lg sidste linje, der ikke er (kun) wakeword
+  $txt = if (Test-Path $SttFile) { (Get-Content -LiteralPath $SttFile -Raw -ErrorAction SilentlyContinue) } else { $null }
+  if (-not $txt) { return $null }
+
+  $lines = $txt -split "`r?`n"
+  for ($i = $lines.Length - 1; $i -ge 0; $i--) {
+    $ln = $lines[$i].Trim()
+    if (-not $ln) { continue }
+    # skip "hej/hey jarvis" + evt. tegns?tning
+    if ($ln -match '^(?i)\s*(hej|hey)\s+jarvis\s*[?.!,:;\-]*\s*
+
+  # K?r STT ?n gang (optag/transskriber)
+  $sb = { & $using:SttCmd }
+  $ok,$out,$err = Invoke-WithTimeout -Script $sb -TimeoutSec $TimeoutSec
+  if (-not $ok) { Write-Host "STT error/timeout: $err" -ForegroundColor Yellow; return $null }
+
+  # L?s hele filen og v?lg sidste linje, der IKKE er wakeword
+  $txt = if (Test-Path $SttFile) { (Get-Content -LiteralPath $SttFile -Raw -ErrorAction SilentlyContinue) } else { $null }
+  if (-not $txt) { return $null }
+
+  $lines = $txt -split "`r?`n"
+  for ($i = $lines.Length - 1; $i -ge 0; $i--) {
+    $ln = $lines[$i].Trim()
+    if (-not $ln) { continue }
+    # Skip linjer der kun er wakeword
+    if ($ln -match '(?i)^\s*(hej|hey)\s+jarvis\s*[?.!]*\s*
+  $sb = { & $using:SttCmd }
+  $ok,$out,$err = Invoke-WithTimeout -Script $sb -TimeoutSec $TimeoutSec
+  if (-not $ok) { Write-Host "STT error/timeout: $err" -ForegroundColor Yellow; return $null }
+  $txt = if (Test-Path $SttFile) { (Get-Content -LiteralPath $SttFile -Raw -ErrorAction SilentlyContinue) } else { $null }
+  $txt = if ($txt) { $txt.Trim() } else { $null }
+  $lastLine = Get-LastNonEmptyLine $txt
+  return $lastLine
+}
+
+# self-test
+if ($Test) {
+  Write-Host "TEST: running" -ForegroundColor Yellow
+  $samples = @(
+    "Hej Jarvis",
+    "Hey Jarvis - status?",
+    "Jarvis, taend lyset i garagen",
+    "jarvis?",
+    "intet wakeword her",
+    "Hej Jarvis kan du sige hej paa dansk"
+  )
+  foreach($p in $samples){
+    Write-Host "-----" -ForegroundColor DarkGray
+    Write-Host "TEST raw: $p" -ForegroundColor DarkYellow
+    $found,$msg = Extract-Message $p
+    if ($found) {
+      try { [console]::Beep(1200,120) } catch {}
+      if ([string]::IsNullOrWhiteSpace($msg)) {
+        Speak-Safe -Text "Jeg lytter..." -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+        Write-Host "Wakeword only -> start STT" -ForegroundColor DarkGreen
+        $next = Get-NextUtterance -TimeoutSec $SttTimeoutSec
+        if ($next) {
+          Write-Host "Next utterance: $next" -ForegroundColor Cyan
+          $reply = AskAI-Safe -Msg $next -TimeoutSec $AiTimeoutSec
+          if (-not $reply) { $reply = "Jeg er her." }
+          Speak-Safe -Text $reply -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+        } else {
+          Write-Host "No speech detected." -ForegroundColor Yellow
+        }
+        continue
+      }
+      Write-Host "Activated with: $msg" -ForegroundColor Cyan
+      $reply = AskAI-Safe -Msg $msg -TimeoutSec $AiTimeoutSec
+      if (-not $reply) { $reply = "Jeg er her." }
+      Speak-Safe -Text $reply -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+    } else {
+      Write-Host "No wakeword" -ForegroundColor DarkGray
+    }
+  }
+  Write-Host "TEST: done" -ForegroundColor Green
+  exit 0
+}
+
+# normal loop
+$lastWrite = $null
+$lastSeen  = $null
+if (Test-Path $SttFile) {
+  try { $lastSeen = (Get-Content -LiteralPath $SttFile -Raw -ErrorAction SilentlyContinue) } catch {}
+} else {
+  Write-Host "INIT: waiting for STT file: $SttFile" -ForegroundColor Yellow
+}
+Write-Host "RUN: loop start (Ctrl+C to stop)" -ForegroundColor Green
+
+while ($true) {
+  try {
+    if (-not (Test-Path $SttFile)) { Start-Sleep -Milliseconds 300; continue }
+
+    $fi = Get-Item -LiteralPath $SttFile -ErrorAction SilentlyContinue
+    if (-not $fi) { Start-Sleep -Milliseconds 150; continue }
+
+    $w = $fi.LastWriteTimeUtc
+    if ($lastWrite -and $w -eq $lastWrite) { Start-Sleep -Milliseconds 120; continue }
+
+    $raw = Get-PromptFromFile -Path $SttFile
+    $lastWrite = $w
+
+    if (-not $raw) { Start-Sleep -Milliseconds 120; continue }
+    if ($raw -eq $lastSeen) { Start-Sleep -Milliseconds 80; continue }
+    $lastSeen = $raw
+
+    Write-Host "DBG raw: $raw" -ForegroundColor DarkYellow
+
+    $found,$msg = Extract-Message $raw
+    if ($found) {
+      try { [console]::Beep(1200,120) } catch {}
+      if ([string]::IsNullOrWhiteSpace($msg)) {
+        Speak-Safe -Text "Jeg lytter..." -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+        Write-Host "Wakeword -> start STT" -ForegroundColor DarkGreen
+        $next = Get-NextUtterance -TimeoutSec $SttTimeoutSec
+        if (-not $next) { Write-Host "No speech detected." -ForegroundColor Yellow; continue }
+        Write-Host "Next utterance: $next" -ForegroundColor Cyan
+        $msg = $next
+      } else {
+        Write-Host "Activated with: $msg" -ForegroundColor Cyan
+      }
+
+      $reply = AskAI-Safe -Msg $msg -TimeoutSec $AiTimeoutSec
+      if (-not $reply) { $reply = "Jeg er her." }
+      Speak-Safe -Text $reply -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+    }
+
+    Start-Sleep -Milliseconds 120
+  }
+  catch {
+    Write-Host ("Loop error: " + $_.Exception.Message) -ForegroundColor Red
+    Start-Sleep -Milliseconds 400
+  }
+}
+) { continue }
+    return $ln
+  }
+  return $null
+}
+  $sb = { & $using:SttCmd }
+  $ok,$out,$err = Invoke-WithTimeout -Script $sb -TimeoutSec $TimeoutSec
+  if (-not $ok) { Write-Host "STT error/timeout: $err" -ForegroundColor Yellow; return $null }
+  $txt = if (Test-Path $SttFile) { (Get-Content -LiteralPath $SttFile -Raw -ErrorAction SilentlyContinue) } else { $null }
+  $txt = if ($txt) { $txt.Trim() } else { $null }
+  $lastLine = Get-LastNonEmptyLine $txt
+  return $lastLine
+}
+
+# self-test
+if ($Test) {
+  Write-Host "TEST: running" -ForegroundColor Yellow
+  $samples = @(
+    "Hej Jarvis",
+    "Hey Jarvis - status?",
+    "Jarvis, taend lyset i garagen",
+    "jarvis?",
+    "intet wakeword her",
+    "Hej Jarvis kan du sige hej paa dansk"
+  )
+  foreach($p in $samples){
+    Write-Host "-----" -ForegroundColor DarkGray
+    Write-Host "TEST raw: $p" -ForegroundColor DarkYellow
+    $found,$msg = Extract-Message $p
+    if ($found) {
+      try { [console]::Beep(1200,120) } catch {}
+      if ([string]::IsNullOrWhiteSpace($msg)) {
+        Speak-Safe -Text "Jeg lytter..." -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+        Write-Host "Wakeword only -> start STT" -ForegroundColor DarkGreen
+        $next = Get-NextUtterance -TimeoutSec $SttTimeoutSec
+        if ($next) {
+          Write-Host "Next utterance: $next" -ForegroundColor Cyan
+          $reply = AskAI-Safe -Msg $next -TimeoutSec $AiTimeoutSec
+          if (-not $reply) { $reply = "Jeg er her." }
+          Speak-Safe -Text $reply -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+        } else {
+          Write-Host "No speech detected." -ForegroundColor Yellow
+        }
+        continue
+      }
+      Write-Host "Activated with: $msg" -ForegroundColor Cyan
+      $reply = AskAI-Safe -Msg $msg -TimeoutSec $AiTimeoutSec
+      if (-not $reply) { $reply = "Jeg er her." }
+      Speak-Safe -Text $reply -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+    } else {
+      Write-Host "No wakeword" -ForegroundColor DarkGray
+    }
+  }
+  Write-Host "TEST: done" -ForegroundColor Green
+  exit 0
+}
+
+# normal loop
+$lastWrite = $null
+$lastSeen  = $null
+if (Test-Path $SttFile) {
+  try { $lastSeen = (Get-Content -LiteralPath $SttFile -Raw -ErrorAction SilentlyContinue) } catch {}
+} else {
+  Write-Host "INIT: waiting for STT file: $SttFile" -ForegroundColor Yellow
+}
+Write-Host "RUN: loop start (Ctrl+C to stop)" -ForegroundColor Green
+
+while ($true) {
+  try {
+    if (-not (Test-Path $SttFile)) { Start-Sleep -Milliseconds 300; continue }
+
+    $fi = Get-Item -LiteralPath $SttFile -ErrorAction SilentlyContinue
+    if (-not $fi) { Start-Sleep -Milliseconds 150; continue }
+
+    $w = $fi.LastWriteTimeUtc
+    if ($lastWrite -and $w -eq $lastWrite) { Start-Sleep -Milliseconds 120; continue }
+
+    $raw = Get-PromptFromFile -Path $SttFile
+    $lastWrite = $w
+
+    if (-not $raw) { Start-Sleep -Milliseconds 120; continue }
+    if ($raw -eq $lastSeen) { Start-Sleep -Milliseconds 80; continue }
+    $lastSeen = $raw
+
+    Write-Host "DBG raw: $raw" -ForegroundColor DarkYellow
+
+    $found,$msg = Extract-Message $raw
+    if ($found) {
+      try { [console]::Beep(1200,120) } catch {}
+      if ([string]::IsNullOrWhiteSpace($msg)) {
+        Speak-Safe -Text "Jeg lytter..." -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+        Write-Host "Wakeword -> start STT" -ForegroundColor DarkGreen
+        $next = Get-NextUtterance -TimeoutSec $SttTimeoutSec
+        if (-not $next) { Write-Host "No speech detected." -ForegroundColor Yellow; continue }
+        Write-Host "Next utterance: $next" -ForegroundColor Cyan
+        $msg = $next
+      } else {
+        Write-Host "Activated with: $msg" -ForegroundColor Cyan
+      }
+
+      $reply = AskAI-Safe -Msg $msg -TimeoutSec $AiTimeoutSec
+      if (-not $reply) { $reply = "Jeg er her." }
+      Speak-Safe -Text $reply -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+    }
+
+    Start-Sleep -Milliseconds 120
+  }
+  catch {
+    Write-Host ("Loop error: " + $_.Exception.Message) -ForegroundColor Red
+    Start-Sleep -Milliseconds 400
+  }
+}
+
+) { continue }
+    # skip "jarvis" alene + evt. tegns?tning
+    if ($ln -match '^(?i)\s*jarvis\s*[?.!,:;\-]*\s*
+
+  # K?r STT ?n gang (optag/transskriber)
+  $sb = { & $using:SttCmd }
+  $ok,$out,$err = Invoke-WithTimeout -Script $sb -TimeoutSec $TimeoutSec
+  if (-not $ok) { Write-Host "STT error/timeout: $err" -ForegroundColor Yellow; return $null }
+
+  # L?s hele filen og v?lg sidste linje, der IKKE er wakeword
+  $txt = if (Test-Path $SttFile) { (Get-Content -LiteralPath $SttFile -Raw -ErrorAction SilentlyContinue) } else { $null }
+  if (-not $txt) { return $null }
+
+  $lines = $txt -split "`r?`n"
+  for ($i = $lines.Length - 1; $i -ge 0; $i--) {
+    $ln = $lines[$i].Trim()
+    if (-not $ln) { continue }
+    # Skip linjer der kun er wakeword
+    if ($ln -match '(?i)^\s*(hej|hey)\s+jarvis\s*[?.!]*\s*
+  $sb = { & $using:SttCmd }
+  $ok,$out,$err = Invoke-WithTimeout -Script $sb -TimeoutSec $TimeoutSec
+  if (-not $ok) { Write-Host "STT error/timeout: $err" -ForegroundColor Yellow; return $null }
+  $txt = if (Test-Path $SttFile) { (Get-Content -LiteralPath $SttFile -Raw -ErrorAction SilentlyContinue) } else { $null }
+  $txt = if ($txt) { $txt.Trim() } else { $null }
+  $lastLine = Get-LastNonEmptyLine $txt
+  return $lastLine
+}
+
+# self-test
+if ($Test) {
+  Write-Host "TEST: running" -ForegroundColor Yellow
+  $samples = @(
+    "Hej Jarvis",
+    "Hey Jarvis - status?",
+    "Jarvis, taend lyset i garagen",
+    "jarvis?",
+    "intet wakeword her",
+    "Hej Jarvis kan du sige hej paa dansk"
+  )
+  foreach($p in $samples){
+    Write-Host "-----" -ForegroundColor DarkGray
+    Write-Host "TEST raw: $p" -ForegroundColor DarkYellow
+    $found,$msg = Extract-Message $p
+    if ($found) {
+      try { [console]::Beep(1200,120) } catch {}
+      if ([string]::IsNullOrWhiteSpace($msg)) {
+        Speak-Safe -Text "Jeg lytter..." -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+        Write-Host "Wakeword only -> start STT" -ForegroundColor DarkGreen
+        $next = Get-NextUtterance -TimeoutSec $SttTimeoutSec
+        if ($next) {
+          Write-Host "Next utterance: $next" -ForegroundColor Cyan
+          $reply = AskAI-Safe -Msg $next -TimeoutSec $AiTimeoutSec
+          if (-not $reply) { $reply = "Jeg er her." }
+          Speak-Safe -Text $reply -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+        } else {
+          Write-Host "No speech detected." -ForegroundColor Yellow
+        }
+        continue
+      }
+      Write-Host "Activated with: $msg" -ForegroundColor Cyan
+      $reply = AskAI-Safe -Msg $msg -TimeoutSec $AiTimeoutSec
+      if (-not $reply) { $reply = "Jeg er her." }
+      Speak-Safe -Text $reply -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+    } else {
+      Write-Host "No wakeword" -ForegroundColor DarkGray
+    }
+  }
+  Write-Host "TEST: done" -ForegroundColor Green
+  exit 0
+}
+
+# normal loop
+$lastWrite = $null
+$lastSeen  = $null
+if (Test-Path $SttFile) {
+  try { $lastSeen = (Get-Content -LiteralPath $SttFile -Raw -ErrorAction SilentlyContinue) } catch {}
+} else {
+  Write-Host "INIT: waiting for STT file: $SttFile" -ForegroundColor Yellow
+}
+Write-Host "RUN: loop start (Ctrl+C to stop)" -ForegroundColor Green
+
+while ($true) {
+  try {
+    if (-not (Test-Path $SttFile)) { Start-Sleep -Milliseconds 300; continue }
+
+    $fi = Get-Item -LiteralPath $SttFile -ErrorAction SilentlyContinue
+    if (-not $fi) { Start-Sleep -Milliseconds 150; continue }
+
+    $w = $fi.LastWriteTimeUtc
+    if ($lastWrite -and $w -eq $lastWrite) { Start-Sleep -Milliseconds 120; continue }
+
+    $raw = Get-PromptFromFile -Path $SttFile
+    $lastWrite = $w
+
+    if (-not $raw) { Start-Sleep -Milliseconds 120; continue }
+    if ($raw -eq $lastSeen) { Start-Sleep -Milliseconds 80; continue }
+    $lastSeen = $raw
+
+    Write-Host "DBG raw: $raw" -ForegroundColor DarkYellow
+
+    $found,$msg = Extract-Message $raw
+    if ($found) {
+      try { [console]::Beep(1200,120) } catch {}
+      if ([string]::IsNullOrWhiteSpace($msg)) {
+        Speak-Safe -Text "Jeg lytter..." -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+        Write-Host "Wakeword -> start STT" -ForegroundColor DarkGreen
+        $next = Get-NextUtterance -TimeoutSec $SttTimeoutSec
+        if (-not $next) { Write-Host "No speech detected." -ForegroundColor Yellow; continue }
+        Write-Host "Next utterance: $next" -ForegroundColor Cyan
+        $msg = $next
+      } else {
+        Write-Host "Activated with: $msg" -ForegroundColor Cyan
+      }
+
+      $reply = AskAI-Safe -Msg $msg -TimeoutSec $AiTimeoutSec
+      if (-not $reply) { $reply = "Jeg er her." }
+      Speak-Safe -Text $reply -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+    }
+
+    Start-Sleep -Milliseconds 120
+  }
+  catch {
+    Write-Host ("Loop error: " + $_.Exception.Message) -ForegroundColor Red
+    Start-Sleep -Milliseconds 400
+  }
+}
+) { continue }
+    return $ln
+  }
+  return $null
+}
+  $sb = { & $using:SttCmd }
+  $ok,$out,$err = Invoke-WithTimeout -Script $sb -TimeoutSec $TimeoutSec
+  if (-not $ok) { Write-Host "STT error/timeout: $err" -ForegroundColor Yellow; return $null }
+  $txt = if (Test-Path $SttFile) { (Get-Content -LiteralPath $SttFile -Raw -ErrorAction SilentlyContinue) } else { $null }
+  $txt = if ($txt) { $txt.Trim() } else { $null }
+  $lastLine = Get-LastNonEmptyLine $txt
+  return $lastLine
+}
+
+# self-test
+if ($Test) {
+  Write-Host "TEST: running" -ForegroundColor Yellow
+  $samples = @(
+    "Hej Jarvis",
+    "Hey Jarvis - status?",
+    "Jarvis, taend lyset i garagen",
+    "jarvis?",
+    "intet wakeword her",
+    "Hej Jarvis kan du sige hej paa dansk"
+  )
+  foreach($p in $samples){
+    Write-Host "-----" -ForegroundColor DarkGray
+    Write-Host "TEST raw: $p" -ForegroundColor DarkYellow
+    $found,$msg = Extract-Message $p
+    if ($found) {
+      try { [console]::Beep(1200,120) } catch {}
+      if ([string]::IsNullOrWhiteSpace($msg)) {
+        Speak-Safe -Text "Jeg lytter..." -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+        Write-Host "Wakeword only -> start STT" -ForegroundColor DarkGreen
+        $next = Get-NextUtterance -TimeoutSec $SttTimeoutSec
+        if ($next) {
+          Write-Host "Next utterance: $next" -ForegroundColor Cyan
+          $reply = AskAI-Safe -Msg $next -TimeoutSec $AiTimeoutSec
+          if (-not $reply) { $reply = "Jeg er her." }
+          Speak-Safe -Text $reply -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+        } else {
+          Write-Host "No speech detected." -ForegroundColor Yellow
+        }
+        continue
+      }
+      Write-Host "Activated with: $msg" -ForegroundColor Cyan
+      $reply = AskAI-Safe -Msg $msg -TimeoutSec $AiTimeoutSec
+      if (-not $reply) { $reply = "Jeg er her." }
+      Speak-Safe -Text $reply -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+    } else {
+      Write-Host "No wakeword" -ForegroundColor DarkGray
+    }
+  }
+  Write-Host "TEST: done" -ForegroundColor Green
+  exit 0
+}
+
+# normal loop
+$lastWrite = $null
+$lastSeen  = $null
+if (Test-Path $SttFile) {
+  try { $lastSeen = (Get-Content -LiteralPath $SttFile -Raw -ErrorAction SilentlyContinue) } catch {}
+} else {
+  Write-Host "INIT: waiting for STT file: $SttFile" -ForegroundColor Yellow
+}
+Write-Host "RUN: loop start (Ctrl+C to stop)" -ForegroundColor Green
+
+while ($true) {
+  try {
+    if (-not (Test-Path $SttFile)) { Start-Sleep -Milliseconds 300; continue }
+
+    $fi = Get-Item -LiteralPath $SttFile -ErrorAction SilentlyContinue
+    if (-not $fi) { Start-Sleep -Milliseconds 150; continue }
+
+    $w = $fi.LastWriteTimeUtc
+    if ($lastWrite -and $w -eq $lastWrite) { Start-Sleep -Milliseconds 120; continue }
+
+    $raw = Get-PromptFromFile -Path $SttFile
+    $lastWrite = $w
+
+    if (-not $raw) { Start-Sleep -Milliseconds 120; continue }
+    if ($raw -eq $lastSeen) { Start-Sleep -Milliseconds 80; continue }
+    $lastSeen = $raw
+
+    Write-Host "DBG raw: $raw" -ForegroundColor DarkYellow
+
+    $found,$msg = Extract-Message $raw
+    if ($found) {
+      try { [console]::Beep(1200,120) } catch {}
+      if ([string]::IsNullOrWhiteSpace($msg)) {
+        Speak-Safe -Text "Jeg lytter..." -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+        Write-Host "Wakeword -> start STT" -ForegroundColor DarkGreen
+        $next = Get-NextUtterance -TimeoutSec $SttTimeoutSec
+        if (-not $next) { Write-Host "No speech detected." -ForegroundColor Yellow; continue }
+        Write-Host "Next utterance: $next" -ForegroundColor Cyan
+        $msg = $next
+      } else {
+        Write-Host "Activated with: $msg" -ForegroundColor Cyan
+      }
+
+      $reply = AskAI-Safe -Msg $msg -TimeoutSec $AiTimeoutSec
+      if (-not $reply) { $reply = "Jeg er her." }
+      Speak-Safe -Text $reply -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+    }
+
+    Start-Sleep -Milliseconds 120
+  }
+  catch {
+    Write-Host ("Loop error: " + $_.Exception.Message) -ForegroundColor Red
+    Start-Sleep -Milliseconds 400
+  }
+}
+
+) { continue }
+    return $ln
+  }
+  return $null
+}
+
+  # K?r STT ?n gang (optag/transskriber)
+  $sb = { & $using:SttCmd }
+  $ok,$out,$err = Invoke-WithTimeout -Script $sb -TimeoutSec $TimeoutSec
+  if (-not $ok) { Write-Host "STT error/timeout: $err" -ForegroundColor Yellow; return $null }
+
+  # L?s hele filen og v?lg sidste linje, der IKKE er wakeword
+  $txt = if (Test-Path $SttFile) { (Get-Content -LiteralPath $SttFile -Raw -ErrorAction SilentlyContinue) } else { $null }
+  if (-not $txt) { return $null }
+
+  $lines = $txt -split "`r?`n"
+  for ($i = $lines.Length - 1; $i -ge 0; $i--) {
+    $ln = $lines[$i].Trim()
+    if (-not $ln) { continue }
+    # Skip linjer der kun er wakeword
+    if ($ln -match '(?i)^\s*(hej|hey)\s+jarvis\s*[?.!]*\s*
+  $sb = { & $using:SttCmd }
+  $ok,$out,$err = Invoke-WithTimeout -Script $sb -TimeoutSec $TimeoutSec
+  if (-not $ok) { Write-Host "STT error/timeout: $err" -ForegroundColor Yellow; return $null }
+  $txt = if (Test-Path $SttFile) { (Get-Content -LiteralPath $SttFile -Raw -ErrorAction SilentlyContinue) } else { $null }
+  $txt = if ($txt) { $txt.Trim() } else { $null }
+  $lastLine = Get-LastNonEmptyLine $txt
+  return $lastLine
+}
+
+# self-test
+if ($Test) {
+  Write-Host "TEST: running" -ForegroundColor Yellow
+  $samples = @(
+    "Hej Jarvis",
+    "Hey Jarvis - status?",
+    "Jarvis, taend lyset i garagen",
+    "jarvis?",
+    "intet wakeword her",
+    "Hej Jarvis kan du sige hej paa dansk"
+  )
+  foreach($p in $samples){
+    Write-Host "-----" -ForegroundColor DarkGray
+    Write-Host "TEST raw: $p" -ForegroundColor DarkYellow
+    $found,$msg = Extract-Message $p
+    if ($found) {
+      try { [console]::Beep(1200,120) } catch {}
+      if ([string]::IsNullOrWhiteSpace($msg)) {
+        Speak-Safe -Text "Jeg lytter..." -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+        Write-Host "Wakeword only -> start STT" -ForegroundColor DarkGreen
+        $next = Get-NextUtterance -TimeoutSec $SttTimeoutSec
+        if ($next) {
+          Write-Host "Next utterance: $next" -ForegroundColor Cyan
+          $reply = AskAI-Safe -Msg $next -TimeoutSec $AiTimeoutSec
+          if (-not $reply) { $reply = "Jeg er her." }
+          Speak-Safe -Text $reply -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+        } else {
+          Write-Host "No speech detected." -ForegroundColor Yellow
+        }
+        continue
+      }
+      Write-Host "Activated with: $msg" -ForegroundColor Cyan
+      $reply = AskAI-Safe -Msg $msg -TimeoutSec $AiTimeoutSec
+      if (-not $reply) { $reply = "Jeg er her." }
+      Speak-Safe -Text $reply -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+    } else {
+      Write-Host "No wakeword" -ForegroundColor DarkGray
+    }
+  }
+  Write-Host "TEST: done" -ForegroundColor Green
+  exit 0
+}
+
+# normal loop
+$lastWrite = $null
+$lastSeen  = $null
+if (Test-Path $SttFile) {
+  try { $lastSeen = (Get-Content -LiteralPath $SttFile -Raw -ErrorAction SilentlyContinue) } catch {}
+} else {
+  Write-Host "INIT: waiting for STT file: $SttFile" -ForegroundColor Yellow
+}
+Write-Host "RUN: loop start (Ctrl+C to stop)" -ForegroundColor Green
+
+while ($true) {
+  try {
+    if (-not (Test-Path $SttFile)) { Start-Sleep -Milliseconds 300; continue }
+
+    $fi = Get-Item -LiteralPath $SttFile -ErrorAction SilentlyContinue
+    if (-not $fi) { Start-Sleep -Milliseconds 150; continue }
+
+    $w = $fi.LastWriteTimeUtc
+    if ($lastWrite -and $w -eq $lastWrite) { Start-Sleep -Milliseconds 120; continue }
+
+    $raw = Get-PromptFromFile -Path $SttFile
+    $lastWrite = $w
+
+    if (-not $raw) { Start-Sleep -Milliseconds 120; continue }
+    if ($raw -eq $lastSeen) { Start-Sleep -Milliseconds 80; continue }
+    $lastSeen = $raw
+
+    Write-Host "DBG raw: $raw" -ForegroundColor DarkYellow
+
+    $found,$msg = Extract-Message $raw
+    if ($found) {
+      try { [console]::Beep(1200,120) } catch {}
+      if ([string]::IsNullOrWhiteSpace($msg)) {
+        Speak-Safe -Text "Jeg lytter..." -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+        Write-Host "Wakeword -> start STT" -ForegroundColor DarkGreen
+        $next = Get-NextUtterance -TimeoutSec $SttTimeoutSec
+        if (-not $next) { Write-Host "No speech detected." -ForegroundColor Yellow; continue }
+        Write-Host "Next utterance: $next" -ForegroundColor Cyan
+        $msg = $next
+      } else {
+        Write-Host "Activated with: $msg" -ForegroundColor Cyan
+      }
+
+      $reply = AskAI-Safe -Msg $msg -TimeoutSec $AiTimeoutSec
+      if (-not $reply) { $reply = "Jeg er her." }
+      Speak-Safe -Text $reply -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+    }
+
+    Start-Sleep -Milliseconds 120
+  }
+  catch {
+    Write-Host ("Loop error: " + $_.Exception.Message) -ForegroundColor Red
+    Start-Sleep -Milliseconds 400
+  }
+}
+) { continue }
+    return $ln
+  }
+  return $null
+}
+  $sb = { & $using:SttCmd }
+  $ok,$out,$err = Invoke-WithTimeout -Script $sb -TimeoutSec $TimeoutSec
+  if (-not $ok) { Write-Host "STT error/timeout: $err" -ForegroundColor Yellow; return $null }
+  $txt = if (Test-Path $SttFile) { (Get-Content -LiteralPath $SttFile -Raw -ErrorAction SilentlyContinue) } else { $null }
+  $txt = if ($txt) { $txt.Trim() } else { $null }
+  $lastLine = Get-LastNonEmptyLine $txt
+  return $lastLine
+}
+
+# self-test
+if ($Test) {
+  Write-Host "TEST: running" -ForegroundColor Yellow
+  $samples = @(
+    "Hej Jarvis",
+    "Hey Jarvis - status?",
+    "Jarvis, taend lyset i garagen",
+    "jarvis?",
+    "intet wakeword her",
+    "Hej Jarvis kan du sige hej paa dansk"
+  )
+  foreach($p in $samples){
+    Write-Host "-----" -ForegroundColor DarkGray
+    Write-Host "TEST raw: $p" -ForegroundColor DarkYellow
+    $found,$msg = Extract-Message $p
+    if ($found) {
+      try { [console]::Beep(1200,120) } catch {}
+      if ([string]::IsNullOrWhiteSpace($msg)) {
+        Speak-Safe -Text "Jeg lytter..." -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+        Write-Host "Wakeword only -> start STT" -ForegroundColor DarkGreen
+        $next = Get-NextUtterance -TimeoutSec $SttTimeoutSec
+        if ($next) {
+          Write-Host "Next utterance: $next" -ForegroundColor Cyan
+          $reply = AskAI-Safe -Msg $next -TimeoutSec $AiTimeoutSec
+          if (-not $reply) { $reply = "Jeg er her." }
+          Speak-Safe -Text $reply -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+        } else {
+          Write-Host "No speech detected." -ForegroundColor Yellow
+        }
+        continue
+      }
+      Write-Host "Activated with: $msg" -ForegroundColor Cyan
+      $reply = AskAI-Safe -Msg $msg -TimeoutSec $AiTimeoutSec
+      if (-not $reply) { $reply = "Jeg er her." }
+      Speak-Safe -Text $reply -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+    } else {
+      Write-Host "No wakeword" -ForegroundColor DarkGray
+    }
+  }
+  Write-Host "TEST: done" -ForegroundColor Green
+  exit 0
+}
+
+# normal loop
+$lastWrite = $null
+$lastSeen  = $null
+if (Test-Path $SttFile) {
+  try { $lastSeen = (Get-Content -LiteralPath $SttFile -Raw -ErrorAction SilentlyContinue) } catch {}
+} else {
+  Write-Host "INIT: waiting for STT file: $SttFile" -ForegroundColor Yellow
+}
+Write-Host "RUN: loop start (Ctrl+C to stop)" -ForegroundColor Green
+
+while ($true) {
+  try {
+    if (-not (Test-Path $SttFile)) { Start-Sleep -Milliseconds 300; continue }
+
+    $fi = Get-Item -LiteralPath $SttFile -ErrorAction SilentlyContinue
+    if (-not $fi) { Start-Sleep -Milliseconds 150; continue }
+
+    $w = $fi.LastWriteTimeUtc
+    if ($lastWrite -and $w -eq $lastWrite) { Start-Sleep -Milliseconds 120; continue }
+
+    $raw = Get-PromptFromFile -Path $SttFile
+    $lastWrite = $w
+
+    if (-not $raw) { Start-Sleep -Milliseconds 120; continue }
+    if ($raw -eq $lastSeen) { Start-Sleep -Milliseconds 80; continue }
+    $lastSeen = $raw
+
+    Write-Host "DBG raw: $raw" -ForegroundColor DarkYellow
+
+    $found,$msg = Extract-Message $raw
+    if ($found) {
+      try { [console]::Beep(1200,120) } catch {}
+      if ([string]::IsNullOrWhiteSpace($msg)) {
+        Speak-Safe -Text "Jeg lytter..." -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+        Write-Host "Wakeword -> start STT" -ForegroundColor DarkGreen
+        $next = Get-NextUtterance -TimeoutSec $SttTimeoutSec
+        if (-not $next) { Write-Host "No speech detected." -ForegroundColor Yellow; continue }
+        Write-Host "Next utterance: $next" -ForegroundColor Cyan
+        $msg = $next
+      } else {
+        Write-Host "Activated with: $msg" -ForegroundColor Cyan
+      }
+
+      $reply = AskAI-Safe -Msg $msg -TimeoutSec $AiTimeoutSec
+      if (-not $reply) { $reply = "Jeg er her." }
+      Speak-Safe -Text $reply -Voice $Voice -Rate $Rate -Volume $Volume -TimeoutSec $TtsTimeoutSec | Out-Null
+    }
+
+    Start-Sleep -Milliseconds 120
+  }
+  catch {
+    Write-Host ("Loop error: " + $_.Exception.Message) -ForegroundColor Red
+    Start-Sleep -Milliseconds 400
+  }
+}
+
+
+
+

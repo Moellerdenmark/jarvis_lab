@@ -1,0 +1,142 @@
+param(
+  [string]$Text = "",
+  [switch]$SpeakBack
+)
+
+
+function Get-NormalizedText([string]$Text){
+  $t = [string]($Text ?? '')
+  $t = $t -replace '(?m)^\s*>+\s*',''  # strip ">> "
+  $t.Trim()
+}
+$T = Get-NormalizedText $Text
+# == HOTFIX ROUTERS ==
+$T = [string]($Text ?? '')
+$T = $T -replace '(?m)^\s*>+\s*',''
+$T = $T.Trim()
+try {
+  if ($T -imatch '^\s*el-sum\s*:') {
+    if (-not (Get-Command Invoke-ElSum -EA SilentlyContinue)) {
+      $p = Join-Path $PSScriptRoot 'tools\skills\el-sum.ps1'
+      if (Test-Path $p) { . $p }
+    }
+    $body = ($T -replace '^\s*el-sum\s*:\s*','')
+    $ans  = Invoke-ElSum -Text $body
+    $ans | Write-Output
+    return
+  }
+} catch { Write-Warning ("el-sum fejlede: " + $($_.Exception.Message)) }
+try {
+  if ($T -imatch '^\s*el-liste\s*:') {
+    if (-not (Get-Command Invoke-ElListe -EA SilentlyContinue)) {
+      $p = Join-Path $PSScriptRoot 'tools\skills\el-liste.ps1'
+      if (Test-Path $p) { . $p }
+    }
+    $body = ($T -replace '^\s*el-liste\s*:\s*','')
+    $ans  = Invoke-ElListe -Bullets $body
+    $ans | Write-Output
+    return
+  }
+} catch { Write-Warning ("el-liste fejlede: " + $($_.Exception.Message)) }
+# == /HOTFIX ROUTERS ==
+# == HOTFIX ROUTERS ==
+# Normaliser input: fjern ">> " i starten af hver linje
+$T = $Text
+if ($null -ne $T) { $T = $T -replace '(?m)^\s*>+\s*','' } else { $T = '' }
+
+# el-sum
+try {
+  if ($T -match "(?is)^\s*el-sum\s*:\s*(.+)$") {
+    if (-not (Get-Command Invoke-ElSum -EA SilentlyContinue)) {
+      $p = Join-Path (Join-Path $PSScriptRoot "tools") "skills\el-sum.ps1"
+      if (Test-Path $p) { . $p }
+    }
+    $ans = Invoke-ElSum -Text $Matches[1]
+    $ans | Write-Output
+    return
+  }
+} catch { Write-Warning ("el-sum fejlede: " + $($_.Exception.Message)) }
+
+# el-liste
+try {
+  if ($T -match "(?is)^\s*el-liste\s*:\s*(.+)$") {
+    if (-not (Get-Command Invoke-ElListe -EA SilentlyContinue)) {
+      $p = Join-Path (Join-Path $PSScriptRoot "tools") "skills\el-liste.ps1"
+      if (Test-Path $p) { . $p }
+    }
+    $ans = Invoke-ElListe -Bullets $Matches[1]
+    $ans | Write-Output
+    return
+  }
+} catch { Write-Warning ("el-liste fejlede: " + $($_.Exception.Message)) }
+# == /HOTFIX ROUTERS ==
+# == INPUT NORMALISERING ==
+$T = $Text
+if ($null -ne $T) { $T = $T -replace '(?m)^\s*>+\s*','' } else { $T = '' }
+# == /INPUT NORMALISERING ==
+$ErrorActionPreference = "Stop"
+
+function Import-Skill([string]$RelPath){
+  $p = Join-Path (Join-Path $PSScriptRoot 'tools') $RelPath
+  if (Test-Path $p) { . $p }
+}
+
+# == el-liste router ==
+try {
+  if ($Text -imatch '^\s*el-liste\s*:\s*(.+)$') {
+    Import-Skill 'skills\el-liste.ps1'
+    $bul = $Matches[1]
+    $ans = Invoke-ElListe -Bullets $bul
+    $ans | Write-Output
+    return
+  }
+} catch { Write-Warning "el-liste fejlede: $($_.Exception.Message)" }
+# == /el-liste router ==
+
+# == el-sum router ==
+try {
+  if ($Text -imatch '^\s*el-sum\s*:\s*(.+)$') {
+    Import-Skill 'skills\el-sum.ps1'
+    $blob = $Matches[1]
+    $ans  = Invoke-ElSum -Text $blob
+    $ans | Write-Output
+    return
+  }
+} catch { Write-Warning "el-sum fejlede: $($_.Exception.Message)" }
+# == /el-sum router ==
+
+# == spørge-router ==
+try {
+  if ($Text -imatch '^\s*spørg\s+jarvis\s+og\s+l(?:æ|ae)s\s*:\s*(.+)$') {
+    $q = $Matches[1]
+
+    if (Get-Command askdk_mini -EA SilentlyContinue) {
+      $ans = if ($q.Length -lt 140) { askdk_mini $q } else { askdk_pro $q }
+    } else {
+      $ans = "[INFO] wrappers.ps1 ikke indlæst – kan ikke spørge lokalt LLM."
+    }
+
+    # Nød-fallback: sikr min. 3 bullets hvis der bedes om idéer/forslag
+    $hasBullets = ((($ans -split "\r?\n") | Where-Object { $_ -match "^\s*(?:-|•|–|—|\d+\.)\s" }).Count)
+    if ($q -imatch "\b(ide|idé|forslag)\b" -and $hasBullets -lt 3) {
+      $lines = ($ans -split "\r?\n" | ForEach-Object { $_.Trim() }) | Where-Object { $_ }
+      if ($lines.Count -ge 3) { $ans = ("- " + $lines[0], "- " + $lines[1], "- " + $lines[2]) -join "`r`n" }
+    }
+
+    $ans | Write-Output
+    return
+  }
+} catch { Write-Warning "spørg/læs fejlede: $($_.Exception.Message)" }
+# == /spørge-router ==
+
+# Fallback
+if ($Text) {
+  Write-Output "Ukendt kommando. Prøv: el-liste: ... | el-sum: ... | spørg jarvis og læs: ..."
+} else {
+  Write-Output "Jarvis LAB klar."
+}
+
+
+
+
+

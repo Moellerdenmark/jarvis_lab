@@ -1,0 +1,102 @@
+param(
+  [Parameter(Mandatory=$true)][string]$SttCmd,
+  [Parameter(Mandatory=$true)][string]$TtsCmd,
+  [string]$DeviceName,
+  [int]$ListenSeconds = 6
+)
+
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding          = [System.Text.Encoding]::UTF8
+
+# Hotwords (inkl. typiske STT-fejl)
+$hotwordPatterns = @(
+  'hej\s*jarvis','hey\s*jarvis','hej\s*jervis','hej\s*javis','hej\s*tjavis','hej\s*tjaves','\bjarvis\b'
+)
+
+function Strip-Noise([string]$s){
+  if (-not $s) { return '' }
+  ($s -split "`r?`n" | Where-Object {
+    $_ -and ($_ -notmatch '^(REC:|\[WRAP\]|OK:|WARNING:|===)')
+  }) -join ' '
+}
+
+function Match-Hotword([string]$text){
+  foreach($p in $hotwordPatterns){
+    $m = [regex]::Match($text, $p, 'IgnoreCase')
+    if($m.Success){ return $m }
+  }
+  return $null
+}
+
+function Fold-Danish([string]$s){
+  if (-not $s) { return '' }
+  $t = $s.ToLowerInvariant()
+  $t = $t -replace 'æ','ae' -replace 'ø','oe' -replace 'å','aa'
+  $t = $t -replace '[^a-z0-9\s]',' '
+  ($t -replace '\s+',' ').Trim()
+}
+
+function Resolve-Intent([string]$cmdText){
+  $raw = $cmdText
+  $txt = Fold-Danish $cmdText
+
+  # fuzzy “kan du høre mig?”
+  $hear = '(k(e|ae|a)n(dt)?|ka|kan)\s*(du|de|det|at)?\s*(h(oe|o|ø)re|hoer|hor|horer|h(o|ø)rer)\s*(mig|min|min\s+stemme)?'
+
+  $reOn   = '(t(ae|a|æ)?n(d)?|taen|tæn|ten|tand|til\s+en)'   # tænd / til en
+  $reOff  = '(sluk|luk|slut|slukke)'
+  $reLight= '(lys(et)?|lyse|loese|loesig|loes|lise|lys\s+i)'
+  $reRoom = '(stue(n)?|stuen|stune|sturen)'
+
+  if ($txt -match "($reOn).*$reLight.*$reRoom|$reRoom.*$reLight.*($reOn)") {
+    return @{ intent='turn_on_living_light'; text=$raw }
+  }
+  if ($txt -match "($reOff).*$reLight.*$reRoom|$reRoom.*$reLight.*($reOff)") {
+    return @{ intent='turn_off_living_light'; text=$raw }
+  }
+  if ($txt -match $hear) {
+    return @{ intent='can_you_hear_me'; text=$raw }
+  }
+  return @{ intent='smalltalk'; text=$raw }
+}
+
+Write-Host "RUN: hotword loop (Ctrl+C to stop)" -ForegroundColor Cyan
+
+while ($true) {
+  $raw = & pwsh -NoProfile -ExecutionPolicy Bypass -File $SttCmd `
+            -Seconds $ListenSeconds -DeviceName $DeviceName 2>$null
+  $t = Strip-Noise ( ($raw | Out-String).Trim() )
+  if (-not $t) { continue }
+
+  Write-Host ("HEARD: {0}" -f $t) -ForegroundColor Green
+
+  $m = Match-Hotword $t
+  if (-not $m) { continue }
+
+  $cmd = $t.Substring($m.Index + $m.Length).Trim(' ','.',',',':',';','-','?','!')
+  if (-not $cmd) {
+    & $TtsCmd -Text "Ja? Hvad skal jeg gøre?" -VoiceName Helle -Rate 1
+    continue
+  }
+
+  Write-Host ("CMD: {0}" -f $cmd) -ForegroundColor Yellow
+  $intent = Resolve-Intent $cmd
+
+  switch ($intent.intent) {
+    'can_you_hear_me' {
+      & $TtsCmd -Text "Ja, jeg kan høre dig tydeligt." -VoiceName Helle -Rate 1
+    }
+    'turn_on_living_light' {
+      & $TtsCmd -Text "Okay. Jeg tænder lyset i stuen." -VoiceName Helle -Rate 1
+      # TODO: din rigtige lysautomation her
+    }
+    'turn_off_living_light' {
+      & $TtsCmd -Text "Okay. Jeg slukker lyset i stuen." -VoiceName Helle -Rate 1
+      # TODO: din rigtige lysautomation her
+    }
+    default {
+      & $TtsCmd -Text ("Okay – jeg hørte: {0}" -f $intent.text) -VoiceName Helle -Rate 1
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "actions":[
+    {"op":"write","path":"tools/fil.ps1","content":"Write-Host \"Hej LLM\"\r\n..."}
+  ]
+}

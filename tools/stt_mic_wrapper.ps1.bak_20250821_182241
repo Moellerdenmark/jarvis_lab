@@ -1,0 +1,101 @@
+param(
+  [Alias('ListenSeconds')][int]$Seconds = 6,
+  [string]$Device,
+  [string]$DeviceName,
+  [switch]$ListDevices,
+  [string]$SttCmd
+)
+
+$ErrorActionPreference = 'Stop'
+if (-not $PSScriptRoot) { $PSScriptRoot = (Split-Path -Parent $MyInvocation.MyCommand.Path); if (-not $PSScriptRoot){ $PSScriptRoot = (Get-Location).Path } }
+if (-not $SttCmd) { $SttCmd = Join-Path $PSScriptRoot 'stt.ps1' }
+
+# Stier
+$RootDir  = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$OutDir   = [IO.Path]::GetFullPath((Join-Path $RootDir 'out\listen'))
+$InWav    = Join-Path $OutDir 'jarvis_in.wav'
+$BoostWav = Join-Path $OutDir 'jarvis_in_boosted.wav'
+$SttFile  = Join-Path $OutDir 'last_stt.txt'
+$null = New-Item -ItemType Directory -Force -Path $OutDir -ErrorAction SilentlyContinue
+
+function Get-FFmpegPath {
+  $ff = (Get-Command ffmpeg -ErrorAction SilentlyContinue)?.Source
+  if ($ff) { return $ff }
+  $local = Join-Path $PSScriptRoot '..\ffmpeg\bin\ffmpeg.exe'
+  if (Test-Path $local) { return $local }
+  throw "ffmpeg ikke fundet."
+}
+
+function Show-DShowDevices([string]$FfmpegPath){
+  Write-Host "=== DirectShow-enheder (brug præcis teksten i anførselstegn) ===" -ForegroundColor Yellow
+  & $FfmpegPath -hide_banner -list_devices true -f dshow -i dummy 2>&1 |
+    Where-Object { $_ -match 'DirectShow audio devices|\"' } | ForEach-Object { $_ }
+  Write-Host "================================================================" -ForegroundColor Yellow
+}
+
+function Wait-ForFile([string]$Path,[int]$msTimeout=60000){
+  $t0 = Get-Date
+  while(((Get-Date)-$t0).TotalMilliseconds -lt $msTimeout){
+    if(Test-Path $Path){
+      try{
+        $len = (Get-Item $Path).Length
+        if($len -gt 0){ return $true }
+      }catch{}
+    }
+    Start-Sleep -Milliseconds 150
+  }
+  return $false
+}
+
+$ff = Get-FFmpegPath
+if ($ListDevices) { Show-DShowDevices $ff; return }
+
+# find device
+$dname = if ($PSBoundParameters.ContainsKey('Device')) { $Device } elseif ($PSBoundParameters.ContainsKey('DeviceName')) { $DeviceName } else { $null }
+if (-not $dname) {
+  $probe = & $ff -hide_banner -list_devices true -f dshow -i dummy 2>&1
+  $auto  = ($probe | Where-Object { $_ -match 'Jabra SPEAK 510' } | Select-Object -First 1)
+  if ($auto) { $dname = ($auto -replace '.*\"(.*)\".*','$1') } else { Show-DShowDevices $ff; throw 'Kør igen med -DeviceName "Microphone (Jabra SPEAK 510 USB)".' }
+}
+
+# optag
+Write-Host ("REC: optager {0}s fra ""{1}"" -> {2}" -f $Seconds, $dname, $InWav) -ForegroundColor Cyan
+& $ff -hide_banner -loglevel error -y `
+  -f dshow -guess_layout_max 0 -i ("audio=" + $dname) `
+  -ac 1 -ar 16000 -t $Seconds -c:a pcm_s16le $InWav
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $InWav)) { throw "Mikrofonoptagelse fejlede." }
+
+# boost
+Write-Host ("REC: normaliserer -> {0}" -f $BoostWav) -ForegroundColor Cyan
+& $ff -hide_banner -loglevel error -y `
+  -i $InWav -ac 1 -ar 16000 -sample_fmt s16 `
+  -af "highpass=f=80,lowpass=f=8000,dynaudnorm=p=1,acompressor=threshold=-18dB:ratio=3:attack=5:release=50,volume=6dB,loudnorm=I=-20:LRA=7:TP=-1.5" `
+  $BoostWav
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $BoostWav)) { throw "Kunne ikke producere $BoostWav" }
+
+# nulstil evt. gammel transkript
+Remove-Item -LiteralPath $SttFile -Force -ErrorAction SilentlyContinue
+
+# Kald STT i 'listen' (din STT læser allerede jarvis_in_boosted.wav)
+Write-Host "[WRAP] Kalder STT (mode=listen)..." -ForegroundColor DarkCyan
+$sttOut = & pwsh -NoProfile -ExecutionPolicy Bypass -File $SttCmd -Mode listen 2>&1 | Out-String
+
+# vent op til 60 sek. (første run kan være langsomt)
+$ok = Wait-ForFile -Path $SttFile -msTimeout 60000
+
+if (-not $ok) {
+  Write-Warning "STT-filen blev ikke fundet."
+  Write-Host "=== STT STDOUT/STDERR ===" -ForegroundColor Yellow
+  Write-Host $sttOut
+  return
+}
+
+# læs og returnér transkript (KUN rå tekst til STDOUT)
+$t = (Get-Content -LiteralPath $SttFile -Raw -Encoding utf8) -replace "^\uFEFF",""
+$t = $t.Trim()
+if (-not $t) { Write-Warning "STT-filen er tom."; return }
+
+# Kun ren tekst til loopet:
+$t | Write-Output
+# Valgfri statuslinje til skærm (Information-stream -> loopet fanger den ikke):
+Write-Information ("TRANSCRIPT: {0}" -f $t)

@@ -1,0 +1,154 @@
+param(
+  [string]$Text = "",
+  [switch]$SpeakBack
+)
+
+$ErrorActionPreference = 'Stop'
+
+# --- Load wrappers/agents/skills roligt (hvis de findes) ---
+try { . (Join-Path $PSScriptRoot 'tools\wrappers.ps1') } catch {}
+try { . (Join-Path $PSScriptRoot 'tools\builder_agents.ps1') } catch {}
+Get-ChildItem -EA SilentlyContinue (Join-Path $PSScriptRoot 'tools\skills\*.ps1') | ForEach-Object { try { . $_.FullName } catch {} }
+
+# == el-liste router ==
+try {
+  if ($Text -imatch '^\s*el-liste\s*:\s*(.+)$') {
+    if (-not (Get-Command Invoke-ElListe -EA SilentlyContinue)) {
+      $skillPath = Join-Path (Join-Path $PSScriptRoot 'tools') 'skills\el-liste.ps1'
+      if (Test-Path $skillPath) { . $skillPath }
+    }
+    $bul = $Matches[1]
+    $ans = Invoke-ElListe -Bullets $bul
+    $ans | Write-Output
+    return
+  }
+} catch { Write-Warning "el-liste fejlede: $($_.Exception.Message)" }
+# == /el-liste router ==
+
+# == el-sum router ==
+try {
+  # Fang ALT efter "el-sum:" inkl. linjeskift
+  if ($Text -imatch '^\s*el-sum\s*:\s*([\s\S]+)
+
+# == “spørg jarvis og læs:” router (til dine tests) ==
+try {
+  if ($Text -imatch '^\s*spørg\s+jarvis\s+og\s+læ(s|s)\s*:\s*(.+)$') {
+    $q = $Matches[2]
+    if (Get-Command askdk_mini -EA SilentlyContinue -ErrorAction SilentlyContinue) {
+      $ans = if ($q.Length -lt 120) { askdk_mini $q } else { askdk_pro $q }
+      $ans | Write-Output
+      return
+    } else {
+      Write-Output "[INFO] wrappers.ps1 ikke indlæst – kan ikke spørge lokalt LLM."
+      return
+    }
+  }
+} catch { Write-Warning "spørg/læs fejlede: $($_.Exception.Message)" }
+# == /spørg router ==
+
+# Fallback
+if ($Text) {
+  Write-Output "Ukendt kommando. Prøv: el-liste: ... | el-sum: ... | spørg jarvis og læs: ..."
+} else {
+  Write-Output "Jarvis LAB klar."
+}
+) {
+    if (-not (Get-Command Invoke-ElSum -EA SilentlyContinue)) {
+      $skillPath = Join-Path (Join-Path $PSScriptRoot 'tools') 'skills\el-sum.ps1'
+      if (Test-Path $skillPath) { . $skillPath }
+    }
+    $blob = $Matches[1].Trim()
+    $ans  = Invoke-ElSum -Text $blob
+    $ans | Write-Output
+    return
+  }
+} catch { Write-Warning "el-sum fejlede: $(param(
+  [string]$Text = "",
+  [switch]$SpeakBack
+)
+
+$ErrorActionPreference = 'Stop'
+
+# --- Load wrappers/agents/skills roligt (hvis de findes) ---
+try { . (Join-Path $PSScriptRoot 'tools\wrappers.ps1') } catch {}
+try { . (Join-Path $PSScriptRoot 'tools\builder_agents.ps1') } catch {}
+Get-ChildItem -EA SilentlyContinue (Join-Path $PSScriptRoot 'tools\skills\*.ps1') | ForEach-Object { try { . $_.FullName } catch {} }
+
+# == el-liste router ==
+try {
+  if ($Text -imatch '^\s*el-liste\s*:\s*(.+)$') {
+    if (-not (Get-Command Invoke-ElListe -EA SilentlyContinue)) {
+      $skillPath = Join-Path (Join-Path $PSScriptRoot 'tools') 'skills\el-liste.ps1'
+      if (Test-Path $skillPath) { . $skillPath }
+    }
+    $bul = $Matches[1]
+    $ans = Invoke-ElListe -Bullets $bul
+    $ans | Write-Output
+    return
+  }
+} catch { Write-Warning "el-liste fejlede: $($_.Exception.Message)" }
+# == /el-liste router ==
+
+# == el-sum router ==
+try {
+  if ($Text -imatch '^\s*el-sum\s*:\s*(.+)$') {
+    if (-not (Get-Command Invoke-ElSum -EA SilentlyContinue)) {
+      $skillPath = Join-Path (Join-Path $PSScriptRoot 'tools') 'skills\el-sum.ps1'
+      if (Test-Path $skillPath) { . $skillPath }
+    }
+    $blob = $Matches[1]
+    $ans  = Invoke-ElSum -Text $blob
+    $ans | Write-Output
+    return
+  }
+} catch { Write-Warning "el-sum fejlede: $($_.Exception.Message)" }
+# == /el-sum router ==
+
+# == “spørg jarvis og læs:” router (til dine tests) ==
+try {
+  if ($Text -imatch '^\s*spørg\s+jarvis\s+og\s+læ(s|s)\s*:\s*(.+)$') {
+    $q = $Matches[2]
+    if (Get-Command askdk_mini -EA SilentlyContinue -ErrorAction SilentlyContinue) {
+      $ans = if ($q.Length -lt 120) { askdk_mini $q } else { askdk_pro $q }
+      $ans | Write-Output
+      return
+    } else {
+      Write-Output "[INFO] wrappers.ps1 ikke indlæst – kan ikke spørge lokalt LLM."
+      return
+    }
+  }
+} catch { Write-Warning "spørg/læs fejlede: $($_.Exception.Message)" }
+# == /spørg router ==
+
+# Fallback
+if ($Text) {
+  Write-Output "Ukendt kommando. Prøv: el-liste: ... | el-sum: ... | spørg jarvis og læs: ..."
+} else {
+  Write-Output "Jarvis LAB klar."
+}
+.Exception.Message)" }
+# == /el-sum router ==
+
+# == “spørg jarvis og læs:” router (til dine tests) ==
+try {
+  if ($Text -imatch '^\s*spørg\s+jarvis\s+og\s+læ(s|s)\s*:\s*(.+)$') {
+    $q = $Matches[2]
+    if (Get-Command askdk_mini -EA SilentlyContinue -ErrorAction SilentlyContinue) {
+      $ans = if ($q.Length -lt 120) { askdk_mini $q } else { askdk_pro $q }
+      $ans | Write-Output
+      return
+    } else {
+      Write-Output "[INFO] wrappers.ps1 ikke indlæst – kan ikke spørge lokalt LLM."
+      return
+    }
+  }
+} catch { Write-Warning "spørg/læs fejlede: $($_.Exception.Message)" }
+# == /spørg router ==
+
+# Fallback
+if ($Text) {
+  Write-Output "Ukendt kommando. Prøv: el-liste: ... | el-sum: ... | spørg jarvis og læs: ..."
+} else {
+  Write-Output "Jarvis LAB klar."
+}
+

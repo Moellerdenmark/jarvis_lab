@@ -1,0 +1,51 @@
+param(
+  [Parameter(Mandatory=$true)][string]$SttCmd,
+  [Parameter(Mandatory=$true)][string]$TtsCmd,
+  [string]$DeviceName,
+  [int]$ListenSeconds = 5
+)
+
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding          = [System.Text.Encoding]::UTF8
+
+Write-Host "RUN: hotword loop (Ctrl+C to stop)" -ForegroundColor Cyan
+
+while ($true) {
+  # Kald din mic-wrapper som returnerer KUN transkript på pipeline-output
+  $text = & pwsh -NoProfile -ExecutionPolicy Bypass -File $SttCmd `
+            -Seconds $ListenSeconds -DeviceName $DeviceName 2>$null
+
+  if (-not $text) { continue }  # du talte ikke – bare prøv igen
+
+  # Rens og normaliser
+  $t = ($text -join "`n") -replace "^\uFEFF",""
+  $t = $t -replace "\s+"," " 
+  $t = $t.Trim()
+
+  if (-not $t) { continue }
+
+  Write-Host ("HEARD: {0}" -f $t) -ForegroundColor Green
+
+  # Tjek hotword + træk kommando ud
+  $re = '^\s*(hej\s+jarvis)[\s,.:;-]*(.*)$'
+  $m  = [regex]::Match($t, $re, 'IgnoreCase')
+  if ($m.Success) {
+    $cmd = ($m.Groups[2].Value).Trim()
+    if (-not $cmd) {
+      & $TtsCmd -Text "Ja? Hvad skal jeg gøre?"
+      continue
+    }
+
+    Write-Host ("CMD (inline): {0}" -f $cmd) -ForegroundColor Yellow
+    # Bekræft med TTS
+    & $TtsCmd -Text ("Okay – jeg hørte: {0}" -f $cmd)
+
+    # >>> Her kan du kalde dine egne handlers, fx:
+    # if ($cmd -match 'tænd lyset i stuen') { <kald din smart home kommando> }
+
+  } else {
+    # Ikke et hotword – ignorer
+    continue
+  }
+}

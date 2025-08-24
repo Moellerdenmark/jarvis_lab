@@ -1,0 +1,132 @@
+# ====================== lab_helpers.ps1 (self-build gate) ======================
+
+function Ensure-LLMAgentsLoaded {
+  try { . (Join-Path $PSScriptRoot 'builder_agents.ps1') } catch {}
+  if (-not (Get-Command Jarvis-Orchestrate -EA SilentlyContinue)) {
+    throw 'builder_agents.ps1 mangler eller Jarvis-Orchestrate findes ikke.'
+  }
+}
+
+function Assert-JarvisSyntax([string]$Path){
+  $t=$null;$e=$null
+  [void][System.Management.Automation.Language.Parser]::ParseFile($Path,[ref]$t,[ref]$e)
+  if($e){ throw ("Syntaxfejl i {0}: {1}" -f $Path, $e[0].Message) }
+}
+
+function Assert-JarvisSmoke([string]$Jarvis){
+  $ok1 = & $Jarvis -Text 'el-liste: A 1 stk; B 2 stk'
+  $ok2 = & $Jarvis -Text @"
+el-sum:
+- A — 1 stk
+- B — 2 stk
+"@
+  if(-not ($ok1 -match 'A' -and $ok2 -match 'I alt')){
+    throw "Smoke-tests fejlede."
+  }
+}
+
+if(-not (Get-Command JarvisLab-Diff -EA SilentlyContinue)){
+  function JarvisLab-Diff {
+    param(
+      [string]$Lab  = "$env:USERPROFILE\jarvis_lab",
+      [string]$Core = "$env:USERPROFILE\jarvis_core"
+    )
+    $labTools  = Join-Path $Lab  "tools"
+    $coreTools = Join-Path $Core "tools"
+    Write-Host "Ændrede/ny filer i LAB vs CORE:" -ForegroundColor Yellow
+    $labFiles = Get-ChildItem -Recurse -File $labTools, (Join-Path $Lab "jarvis.ps1")
+    foreach ($f in $labFiles) {
+      $rel = $f.FullName.Substring($Lab.Length+1)
+      $corePath = Join-Path $Core $rel
+      if (-not (Test-Path $corePath)) { Write-Host "[NY] $rel" -ForegroundColor Green; continue }
+      $labHash  = (Get-FileHash $f.FullName -Algorithm SHA256).Hash
+      $coreHash = (Get-FileHash $corePath -Algorithm SHA256).Hash
+      if ($labHash -ne $coreHash) { Write-Host "[ÆNDR] $rel" -ForegroundColor Yellow }
+    }
+  }
+}
+
+function Promote-JarvisLab {
+  param(
+    [switch]$WhatIf,
+    [string]$Lab  = "$env:USERPROFILE\jarvis_lab",
+    [string]$Core = "$env:USERPROFILE\jarvis_core"
+  )
+  # Preflight: stop hvis noget er galt (LAB bliver hvor det er)
+  Assert-JarvisSyntax (Join-Path $Lab 'jarvis.ps1')
+  Assert-JarvisSmoke  (Join-Path $Lab 'jarvis_lab.ps1')
+
+  $stamp  = Get-Date -Format yyyyMMdd-HHmmss
+  $backup = Join-Path $Core ("backup-" + $stamp)
+  New-Item -ItemType Directory -Force -Path $backup | Out-Null
+
+  foreach($src in @((Join-Path $Lab 'jarvis.ps1'), (Join-Path $Lab 'tools'))){
+    $dst = $Core
+    Write-Host "[PROMOTE] $src -> $dst" -ForegroundColor Cyan
+    if(-not $WhatIf){
+      Copy-Item -Recurse -Force -Path (Join-Path $Core (Split-Path $src -Leaf)) -Destination $backup -ErrorAction SilentlyContinue
+      Copy-Item -Recurse -Force -Path $src -Destination $dst
+    }
+  }
+  if($WhatIf){ Write-Host "(WhatIf) Ingen filer kopieret." -ForegroundColor Yellow }
+  else       { Write-Host "[OK] Promovering færdig. Backup i: $backup" -ForegroundColor Green }
+}
+
+function Jarvis-AutoBuild {
+  param(
+    [Parameter(Mandatory)][string],
+    [int] = 2
+  )
+
+  \Continue = 'Stop'
+  \lab = 'lab'  # skriv KUN i LAB
+
+  # Sørg for at wrappers/builder/agents er indlæst og Ollama er oppe
+  Ensure-LLMAgentsLoaded
+
+  # Kør orkestratoren i LAB, og log fejl
+  try {
+    Jarvis-Orchestrate -Goal \ -Approve -MaxRounds \
+  } catch {
+    \ = Join-Path \C:\Users\gubbi 'jarvis_lab\out'
+    New-Item -ItemType Directory -Force -Path \ | Out-Null
+    \ = Join-Path \ ("build-error-{0}.log" -f (Get-Date -Format yyyyMMdd-HHmmss))
+    (\ | Out-String) | Set-Content -Path \ -Encoding UTF8
+    Write-Warning "[BUILD FEJL] Orchestrator stoppede. Forbliver i LAB. Se: \"
+    return
+  }
+
+  # Preflight LAB før promote
+  Assert-JarvisSyntax (Join-Path \C:\Users\gubbi 'jarvis_lab\jarvis.ps1')
+  Assert-JarvisSmoke  (Join-Path \C:\Users\gubbi 'jarvis_lab\jarvis_lab.ps1')
+
+  # Kun hvis alt er grønt -> promote til Core
+  Promote-JarvisLab
+} catch {
+    $_ | Out-String | Set-Content -Path $errFile -Encoding UTF8
+    Write-Warning ("[BUILD FEJL] Orchestrator stoppede. Forbliver i LAB. Se: {0}" -f $errFile)
+    JarvisLab-Diff
+    return
+  }
+
+  # Preflight: syntaks + smoke. Ved fejl: BLIV i LAB.
+  try {
+    Assert-JarvisSyntax (Join-Path $env:USERPROFILE 'jarvis_lab\jarvis.ps1')
+    Assert-JarvisSmoke  (Join-Path $env:USERPROFILE 'jarvis_lab\jarvis_lab.ps1')
+  } catch {
+    $_ | Out-String | Set-Content -Path $errFile -Encoding UTF8
+    Write-Warning ("[STAYS IN LAB] Tests fejlede. Ingen promote. Se: {0}" -f $errFile)
+    JarvisLab-Diff
+    return
+  }
+
+  if ($NoPromote) {
+    Write-Host "[OK] Build og tests grønne. (NoPromote) – bliver i LAB." -ForegroundColor Green
+    return
+  }
+
+  # Alt grønt → promote til CORE
+  Promote-JarvisLab
+}
+# ==================== /lab_helpers.ps1 ====================
+

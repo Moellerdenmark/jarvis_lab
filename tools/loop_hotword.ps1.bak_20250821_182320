@@ -1,0 +1,96 @@
+param(
+  [Parameter(Mandatory=$true)][string]$SttCmd,
+  [Parameter(Mandatory=$true)][string]$TtsCmd,
+  [string]$DeviceName,
+  [int]$ListenSeconds = 5
+)
+
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding          = [System.Text.Encoding]::UTF8
+
+# Hotwords vi accepterer (inkl. typiske STT-fejl)
+$hotwordPatterns = @(
+  'hej\s+jarvis','hey\s+jarvis','hej\s+jervis','hej\s+javis','hej\s+tjavis','hej\s+tjaves','\bjarvis\b'
+)
+
+function Match-Hotword([string]$text){
+  foreach($p in $hotwordPatterns){
+    $m = [regex]::Match($text, $p, 'IgnoreCase')
+    if($m.Success){ return $m }
+  }
+  return $null
+}
+
+function Fold-Danish([string]$s){
+  if (-not $s) { return '' }
+  $t = $s.ToLowerInvariant()
+  $t = $t -replace 'æ','ae' -replace 'ø','oe' -replace 'å','aa'
+  $t = $t -replace '[^a-z0-9\s]',' '
+  $t = ($t -replace '\s+',' ').Trim()
+  return $t
+}
+
+function Resolve-Intent([string]$cmdText){
+  # Brug både original og "folded" tekst til at matche
+  $raw = $cmdText
+  $txt = Fold-Danish $cmdText
+
+  # Kendte intents (tolerante regex’er for STT-fejl)
+  $reOn   = '(t(ae|æ|a)?n(d|)|taen|tæn|ten|tand|til en)'
+  $reOff  = '(sluk|luk|slut|slukke)'
+  $reLight= '(lys(et)?|lyse|loese|loesig|loese|lise|lys i)'
+  $reRoom = '(stue(n)?|stune|sturen|stuen)'
+
+  if ($txt -match "($reOn).*$reLight.*$reRoom|$reRoom.*$reLight.*($reOn)") {
+    return @{ intent='turn_on_living_light'; text=$raw }
+  }
+  if ($txt -match "($reOff).*$reLight.*$reRoom|$reRoom.*$reLight.*($reOff)") {
+    return @{ intent='turn_off_living_light'; text=$raw }
+  }
+  if ($txt -match '(kan du hoere mig|kan du hore mig|kan du høre mig|hoerer du mig|hører du mig|hør mig|hoer mig)') {
+    return @{ intent='can_you_hear_me'; text=$raw }
+  }
+  return @{ intent='smalltalk'; text=$raw }
+}
+
+Write-Host "RUN: hotword loop (Ctrl+C to stop)" -ForegroundColor Cyan
+
+while ($true) {
+  # Kald din STT-wrapper – den returnerer nu KUN ren tekst
+  $raw = & pwsh -NoProfile -ExecutionPolicy Bypass -File $SttCmd `
+            -Seconds $ListenSeconds -DeviceName $DeviceName 2>$null
+  $t = ($raw | Out-String).Trim()
+  if (-not $t) { continue }
+
+  Write-Host ("HEARD: {0}" -f $t) -ForegroundColor Green
+
+  $m = Match-Hotword $t
+  if (-not $m) { continue }
+
+  $cmd = $t.Substring($m.Index + $m.Length).Trim(' ','.',',',':',';','-','?','!')
+  if (-not $cmd) {
+    & $TtsCmd -Text "Ja? Hvad skal jeg gøre?" -VoiceName Helle -Rate 1
+    continue
+  }
+
+  Write-Host ("CMD: {0}" -f $cmd) -ForegroundColor Yellow
+  $intent = Resolve-Intent $cmd
+
+  switch ($intent.intent) {
+    'can_you_hear_me' {
+      & $TtsCmd -Text "Ja, jeg kan høre dig tydeligt." -VoiceName Helle -Rate 1
+    }
+    'turn_on_living_light' {
+      & $TtsCmd -Text "Okay. Jeg tænder lyset i stuen." -VoiceName Helle -Rate 1
+      # TODO: Kald din rigtige lys-automation her
+    }
+    'turn_off_living_light' {
+      & $TtsCmd -Text "Okay. Jeg slukker lyset i stuen." -VoiceName Helle -Rate 1
+      # TODO: Kald din rigtige lys-automation her
+    }
+    default {
+      & $TtsCmd -Text ("Okay – jeg hørte: {0}" -f $intent.text) -VoiceName Helle -Rate 1
+    }
+  }
+}
