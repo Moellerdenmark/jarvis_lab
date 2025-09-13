@@ -37,14 +37,21 @@ $logPath = Join-Path $logDir ("orchestrator_" + $stamp + ".txt")
 Start-Transcript -Path $logPath -Force | Out-Null
 
 function Invoke-GitPush([string]$branch){
-  # Start git som .NET-proces og fang begge streams for at undg? NativeCommandError
+  # Find repo-roden (mappen over /tools)
+  try {
+    $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+  } catch {
+    $repo = (Get-Location).Path
+  }
+
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = 'git'
-  $psi.Arguments = "push -u origin $branch"
+  $psi.Arguments = "-C `"$repo`" push -u origin $branch"
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError  = $true
   $psi.UseShellExecute        = $false
   $psi.CreateNoWindow         = $true
+  $psi.WorkingDirectory       = $repo
 
   $p = [System.Diagnostics.Process]::Start($psi)
   $stdout = $p.StandardOutput.ReadToEnd()
@@ -62,6 +69,7 @@ function Invoke-GitPush([string]$branch){
 
   @{ Exit=$code; Text=$txt; Benign=$benign }
 }
+}
 
 try {
   # Health
@@ -74,6 +82,7 @@ try {
   & powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\pull_inbox.ps1
   & powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\ai_loop.ps1
 
+$branch = (& git -C (Resolve-Path (Join-Path $PSScriptRoot '..')).Path rev-parse --abbrev-ref HEAD).Trim()
   # Push via SSH (quiet/filtered)
   if ($remote) {
     $r = Invoke-GitPush $branch
@@ -146,3 +155,4 @@ finally {
   } catch {}
   try { if (Test-Path $LockPath) { Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue } } catch {}
 }
+
