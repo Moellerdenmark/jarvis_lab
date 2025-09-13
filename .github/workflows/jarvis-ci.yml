@@ -1,0 +1,13 @@
+name: Jarvis CI
+on:
+  pull_request:
+    branches: [ autopilot_main ]
+jobs:
+  sanity:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run README sanity
+        shell: pwsh
+        run: |
+          pwsh -File tools/tests/readme_sanity.ps1
