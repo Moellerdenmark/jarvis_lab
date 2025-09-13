@@ -33,3 +33,12 @@ PS-only pipeline ✓✓
 PS-only pipeline ✓✓
 
 
+# Offline voice loop
+
+Eksempler:
+- Tekst → svar (TTS):  
+  `pwsh -File tools/voice/jarvis_talk.ps1 -InputText "Hej Jarvis"`
+- WAV → svar (TTS):  
+  `pwsh -File tools/voice/jarvis_talk.ps1 -InputWav .\sample.wav`
+- Smoke-test:  
+  `pwsh -File tools/tests/voice_smoke.ps1`
