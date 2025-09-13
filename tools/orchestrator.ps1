@@ -23,16 +23,16 @@ try {
   }
 }catch{
   try {
-    \ = \.Exception.Message
-    if ([string]::IsNullOrWhiteSpace(\) -or
-        \ -match 'Everything up-to-date' -or
-        \ -match '^\s*remote:' -or
-        \ -match '^\s*To\s+github\.com:' -or
-        \ -match 'gh\.io/lfs' -or
-        \ -match 'warning:\s+See\s+https?://gh\.io/lfs') {
-      Write-Host ('Note: ' + \) -ForegroundColor DarkGray
+    $msg = $_.Exception.Message
+    if ([string]::IsNullOrWhiteSpace($msg) -or
+        $msg -match 'Everything up-to-date' -or
+        $msg -match '^\s*remote:' -or
+        $msg -match '^\s*To\s+github\.com:' -or
+        $msg -match 'gh\.io/lfs' -or
+        $msg -match 'warning:\s+See\s+https?://gh\.io/lfs') {
+      Write-Host ('Note: ' + $msg) -ForegroundColor DarkGray
     } else {
-      Write-Host ('Orchestrator error: ' + \) -ForegroundColor Red
+      Write-Host ('Orchestrator error: ' + $msg) -ForegroundColor Red
     }
   } catch {}
 } finally {
@@ -40,6 +40,7 @@ try {
   try { if (Test-Path $LockPath) { Remove-Item -LiteralPath $LockPath -Force } } catch {}
   Write-Host ("Log saved to " + $logPath) -ForegroundColor Cyan
 }
+
 
 
 
