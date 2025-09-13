@@ -11,10 +11,11 @@ function Next-Idx([string]$dir){
 $files = Get-ChildItem $Inbox -Filter *.md -File
 foreach($f in $files){
   $n = Next-Idx $TasksDir
-  $prefix = ("{0:D3}" -f $n)
+  $prefix = ("{0:D3}" -f ([int]$n))
   $safe = ($f.BaseName -replace "[^\w\- ]","").Trim() -replace "\s+","_"
   if([string]::IsNullOrWhiteSpace($safe)){ $safe = "task" }
   $dst = Join-Path $TasksDir ($prefix + "_" + $safe + ".md")
   Move-Item -LiteralPath $f.FullName -Destination $dst -Force
   Write-Host ("Pulled: " + $f.Name + " -> " + (Split-Path $dst -Leaf))
 }
+
