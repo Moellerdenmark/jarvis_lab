@@ -9,5 +9,4 @@ jobs:
       - uses: actions/checkout@v4
       - name: Run README sanity
         shell: pwsh
-        run: |
-          pwsh -File tools/tests/readme_sanity.ps1
+        run: pwsh -File tools/tests/readme_sanity.ps1
