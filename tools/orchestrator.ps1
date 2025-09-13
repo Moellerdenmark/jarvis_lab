@@ -1,19 +1,18 @@
 # --- WORKDIR BOOTSTRAP ---
+$ErrorActionPreference = "Stop"
 try {
-  if ($PSScriptRoot) { Set-Location (Join-Path $PSScriptRoot '..') }
-  elseif ($PSCommandPath) { Set-Location (Split-Path -Parent (Split-Path -Parent $PSCommandPath)) }
-  else {
-    $dir = (Get-Location).Path
-    while ($dir -and -not (Test-Path (Join-Path $dir '.git'))) { $dir = Split-Path -Parent $dir }
-    if ($dir) { Set-Location $dir }
+  # Antag: denne fil ligger i <repo>\tools
+  $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+  if (-not (Test-Path (Join-Path $repoRoot ".git"))) {
+    $probe = & git rev-parse --show-toplevel 2>$null
+    if ($probe) { $repoRoot = $probe.Trim() }
   }
+  Set-Location $repoRoot
 } catch {}
 # --- END WORKDIR BOOTSTRAP ---
 
-$ErrorActionPreference = 'Stop'
-
-# Lockfile
-$LockPath = '.\.autopilot.lock'
+# --- Lock ---
+$LockPath = Join-Path $repoRoot ".autopilot.lock"
 $LockMaxAgeMinutes = 60
 if (Test-Path $LockPath) {
   try {
@@ -22,107 +21,106 @@ if (Test-Path $LockPath) {
       Write-Host ("Another run is active (lock age {0:N0}m). Exiting." -f $ageMin) -ForegroundColor Yellow
       return
     } else {
-      Write-Host 'Stale lock detected. Removing...' -ForegroundColor DarkYellow
+      Write-Host "Stale lock detected. Removing..." -ForegroundColor DarkYellow
       Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
     }
   } catch {}
 }
 Set-Content -Encoding ascii -Path $LockPath -Value ((Get-Date).ToString('s'))
 
-# Log setup
-$logDir = '.\logs'
+# --- Log setup ---
+$logDir = Join-Path $repoRoot "logs"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
-$stamp   = Get-Date -Format 'yyyyMMdd_HHmmss'
+$stamp   = Get-Date -Format "yyyyMMdd_HHmmss"
 $logPath = Join-Path $logDir ("orchestrator_" + $stamp + ".txt")
 Start-Transcript -Path $logPath -Force | Out-Null
 
-function Invoke-GitPush([string]$branch){
-  # Find repo-roden (mappen over /tools)
-  try {
-    $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-  } catch {
-    $repo = (Get-Location).Path
-  }
-
+# --- Helpers ---
+function Invoke-Git([string]$argLine){
   $psi = New-Object System.Diagnostics.ProcessStartInfo
-  $psi.FileName = 'git'
-  $psi.Arguments = "-C `"$repo`" push -u origin $branch"
+  $psi.FileName               = 'git'
+  $psi.Arguments              = "-C `"$repoRoot`" $argLine"
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError  = $true
   $psi.UseShellExecute        = $false
   $psi.CreateNoWindow         = $true
-  $psi.WorkingDirectory       = $repo
-
+  $psi.WorkingDirectory       = $repoRoot
   $p = [System.Diagnostics.Process]::Start($psi)
   $stdout = $p.StandardOutput.ReadToEnd()
   $stderr = $p.StandardError.ReadToEnd()
   $p.WaitForExit()
-
   $txt  = (($stdout + "`n" + $stderr) -replace '\r','').Trim()
   $code = $p.ExitCode
+  @{ Exit=$code; Text=$txt }
+}
 
+function Push-Quiet([string]$branch){
+  $r = Invoke-Git "push -u origin $branch"
+  $txt  = $r.Text
+  $code = $r.Exit
   $benign = ($code -eq 0) -or
             ($txt -match 'Everything up-to-date') -or
             ($txt -match '^\s*(remote:|To\s+github\.com:)') -or
             ($txt -match 'gh\.io/lfs') -or
             ($txt -match 'warning:\s+See\s+https?://gh\.io/lfs')
-
-  @{ Exit=$code; Text=$txt; Benign=$benign }
-}
+  if ($benign) {
+    $lines = @()
+    if ($txt) { $lines = $txt -split "`n" | Where-Object {$_ -and ($_ -notmatch '^\s*(remote:|To\s+github\.com:)')} }
+    if ($lines.Count -gt 0) { Write-Host ($lines -join [Environment]::NewLine) } else { Write-Host ("Push OK ? {0}" -f $branch) -ForegroundColor DarkGray }
+    return $true
+  }
+  if ($txt -match 'HTTP 500' -or $txt -match 'RPC failed') {
+    Write-Host 'Server 500/RPC: repacking and retry...' -ForegroundColor Yellow
+    Invoke-Git "repack -adf --max-pack-size=200m" | Out-Null
+    $r2 = Invoke-Git "push -u origin $branch"
+    $txt2 = $r2.Text
+    $code2 = $r2.Exit
+    $benign2 = ($code2 -eq 0) -or
+               ($txt2 -match 'Everything up-to-date') -or
+               ($txt2 -match '^\s*(remote:|To\s+github\.com:)') -or
+               ($txt2 -match 'gh\.io/lfs')
+    if ($benign2) { Write-Host "Push OK after repack" -ForegroundColor DarkGray; return $true }
+    Write-Host $txt2 -ForegroundColor Red
+    return $false
+  }
+  Write-Host $txt -ForegroundColor Red
+  return $false
 }
 
 try {
-  # Health
-  try { $branch = (git rev-parse --abbrev-ref HEAD).Trim() } catch { $branch = '(unknown)' }
-  $remote = (git remote get-url origin 2>$null)
-  try { $disk = (Get-PSDrive -Name C).Free/1GB } catch { $disk = 0 }
+  # --- Health ---
+  $branch = (& git -C $repoRoot rev-parse --abbrev-ref HEAD 2>$null).Trim()
+  if (-not $branch) { $branch = "(unknown)" }
+  $remote = (& git -C $repoRoot remote get-url origin 2>$null)
+  $disk   = 0; try { $disk = (Get-PSDrive -Name C).Free/1GB } catch {}
   Write-Host ("Health: branch={0} remote={1} freeC={2:N1}GB" -f $branch,$remote,$disk) -ForegroundColor DarkGray
 
-  # Intake + loop
-  & powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\pull_inbox.ps1
-  & powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\ai_loop.ps1
+  # --- Intake + loop ---
+  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tools\pull_inbox.ps1")
+  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tools\ai_loop.ps1")
 
-$branch = (& git -C (Resolve-Path (Join-Path $PSScriptRoot '..')).Path rev-parse --abbrev-ref HEAD).Trim()
-  # Push via SSH (quiet/filtered)
+  # Efter AI-loop kan branch v?re skiftet
+  $branch = (& git -C $repoRoot rev-parse --abbrev-ref HEAD).Trim()
+
+  # --- Quiet push ---
   if ($remote) {
-    $r = Invoke-GitPush $branch
-    if ($r.Benign) {
-      $lines = @()
-      if ($r.Text) {
-        $lines = $r.Text -split "`n" | Where-Object { $_ -and ($_ -notmatch '^\s*(remote:|To\s+github\.com:)') }
-      }
-      if ($lines.Count -gt 0) {
-        Write-Host ($lines -join [Environment]::NewLine)
-      } else {
-        Write-Host ("Push OK ? {0}" -f $branch) -ForegroundColor DarkGray
-      }
-    } else {
-      if ($r.Text -match 'HTTP 500' -or $r.Text -match 'RPC failed') {
-        Write-Host 'Server 500/RPC: repacking and retry...' -ForegroundColor Yellow
-        try { git repack -adf --max-pack-size=200m | Out-Null } catch {}
-        $r = Invoke-GitPush $branch
-      }
-      if (-not $r.Benign) { Write-Host $r.Text -ForegroundColor Red }
-    }
+    [void](Push-Quiet $branch)
   } else {
     Write-Host "No remote 'origin' configured. Skipping push." -ForegroundColor DarkGray
   }
 
-  # Optional PR (base = autopilot_main)
+  # --- Optional PR (base=autopilot_main) ---
   $gh = Get-Command gh -EA SilentlyContinue
   if ($gh) {
     try {
-      & gh auth status 1>$null 2>$null
-      if ($LASTEXITCODE -eq 0) {
-        $base = 'autopilot_main'
-        if ($branch -ne $base) {
-          try { & gh pr create --head $branch --base $base --title ("Jarvis Autodev: " + $branch) --body 'Automated changes by orchestrator.' | Out-Null } catch {}
-        }
+      & $gh.Source auth status 1>$null 2>$null
+      if ($LASTEXITCODE -eq 0 -and $branch -ne 'autopilot_main') {
+        try { & $gh.Source pr create --head $branch --base autopilot_main --title ("Jarvis Autodev: " + $branch) --body "Automated changes by orchestrator." | Out-Null } catch {}
       }
     } catch {}
   }
 
-  # Log rotation (14 days)
+  # --- Log rotation (14d) ---
   try {
     Get-ChildItem $logDir -Filter 'orchestrator_*.txt' -File |
       Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-14) } |
@@ -138,9 +136,9 @@ catch {
         $msg -match '^\s*To\s+github\.com:' -or
         $msg -match 'gh\.io/lfs' -or
         $msg -match 'warning:\s+See\s+https?://gh\.io/lfs') {
-      Write-Host ('Note: ' + $msg) -ForegroundColor DarkGray
+      Write-Host ("Note: " + $msg) -ForegroundColor DarkGray
     } else {
-      Write-Host ('Orchestrator error: ' + $msg) -ForegroundColor Red
+      Write-Host ("Orchestrator error: " + $msg) -ForegroundColor Red
     }
   } catch {}
 }
@@ -150,9 +148,8 @@ finally {
     if ($logPath -and (Test-Path $logPath)) {
       Write-Host ("Log saved to " + (Resolve-Path $logPath)) -ForegroundColor Cyan
     } else {
-      Write-Host 'Log saved (path unavailable)' -ForegroundColor DarkGray
+      Write-Host "Log saved (path unavailable)" -ForegroundColor DarkGray
     }
   } catch {}
   try { if (Test-Path $LockPath) { Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue } } catch {}
 }
-
