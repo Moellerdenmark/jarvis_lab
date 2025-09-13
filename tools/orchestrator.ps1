@@ -96,6 +96,7 @@ try {
   Write-Host ("Health: branch={0} remote={1} freeC={2:N1}GB" -f $branch,$remote,$disk) -ForegroundColor DarkGray
 
   # --- Intake + loop ---
+$head_before = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
   & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tools\pull_inbox.ps1")
   & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tools\ai_loop.ps1")
   # --- Post-sanitize & sanity test (auto-fix README) ---
@@ -120,6 +121,12 @@ try {
   # Efter AI-loop kan branch v?re skiftet
   $branch = (& git -C $repoRoot rev-parse --abbrev-ref HEAD).Trim()
 
+$head_after = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
+$dirty      = (& git -C $repoRoot status --porcelain 2>$null).Trim()
+if (-not $dirty -and $head_after -eq $head_before) {
+  Write-Host "No changes; skipping push/PR." -ForegroundColor DarkGray
+  return
+}
   # --- Quiet push ---
   if ($remote) {
     [void](Push-Quiet $branch)
@@ -171,4 +178,5 @@ finally {
   } catch {}
   try { if (Test-Path $LockPath) { Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue } } catch {}
 }
+
 
