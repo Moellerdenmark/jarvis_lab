@@ -5,5 +5,13 @@
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\ai_loop.ps1
 ```
 
-// Rest of the content...
+## Example Commands
+To run the AI loop, execute the following command in your terminal:
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\ai_loop.ps1
+```
+Autopilot is live.
+
+Service scheduler OK.
+PS-only pipeline ✓
 
