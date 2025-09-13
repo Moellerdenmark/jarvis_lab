@@ -561,7 +561,7 @@ finally {
 
 .Exception.Message
     if ([string]::IsNullOrWhiteSpace($msg) -or
-        $msg -match ''Everything up-to-date'' -or
+        $msg -match 'Everything up-to-date' -or
         $msg -match ''^\s*remote:'' -or
         $msg -match ''^\s*To\s+github\.com:'' -or
         $msg -match ''gh\.io/lfs'' -or
@@ -583,3 +583,4 @@ finally {
   } catch {}
   try { if (Test-Path $LockPath) { Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue } } catch {}
 }
+
