@@ -107,7 +107,8 @@ $head_before = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
   $tests_ok = ($LASTEXITCODE -eq 0)
 
   # stage/commit hvis post_sanitize ændrede noget
-  $dirty = (& git -C $repoRoot status --porcelain).Trim()
+  $dirty_raw = & git -C $repoRoot status --porcelain 2>$null
+$dirty = ($dirty_raw -join "`n").Trim()
   if ($dirty) {
     & git -C $repoRoot add README.md
     try { & git -C $repoRoot commit -m "fix: normalize README markers and fences" | Out-Null } catch {}
@@ -122,7 +123,8 @@ $head_before = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
   $branch = (& git -C $repoRoot rev-parse --abbrev-ref HEAD).Trim()
 
 $head_after = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
-$dirty      = (& git -C $repoRoot status --porcelain 2>$null).Trim()
+$dirty_raw = & git -C $repoRoot status --porcelain 2>$null
+$dirty = ($dirty_raw -join "`n").Trim()
 if (-not $dirty -and $head_after -eq $head_before) {
   Write-Host "No changes; skipping push/PR." -ForegroundColor DarkGray
   return
@@ -178,5 +180,6 @@ finally {
   } catch {}
   try { if (Test-Path $LockPath) { Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue } } catch {}
 }
+
 
 
