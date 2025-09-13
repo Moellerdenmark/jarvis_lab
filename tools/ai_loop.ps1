@@ -1,4 +1,4 @@
-param([string]$TasksDir = "ai_tasks", [int]$MaxFixes = 2)
+param([string]$TasksDir = "ai_tasks", [int]$MaxFixes = 1)
 $ErrorActionPreference = "Stop"
 
 if (-not (Test-Path ".git")) { throw "Run in the jarvis_ai git worktree." }
@@ -26,17 +26,24 @@ $doneDir   = Join-Path $TasksDir 'done'
 $failedDir = Join-Path $TasksDir 'failed'
 foreach($d in @($doneDir,$failedDir)){ if(-not (Test-Path $d)){ New-Item -ItemType Directory -Force -Path $d | Out-Null } }
 
-# ---- Branch + find aider ----
-$branch = 'ai/autodev/' + (Get-Date -Format 'yyyyMMdd_HHmmss')
-git checkout -b $branch | Out-Null
-Write-Host "Branch: $branch" -ForegroundColor Cyan
+# ---- Unik branch ----
+$branch = "ai/autodev/" + (Get-Date -Format "yyyyMMdd_HHmmss_fff") + "_" + ([guid]::NewGuid().ToString("N").Substring(6))
+if ((git branch --list $branch)) { git checkout $branch | Out-Null } else { git checkout -b $branch | Out-Null }
+Write-Host ("Branch: " + $branch) -ForegroundColor Cyan
 
+# ---- Find aider ----
 $exe = @('.\.aider_venv\Scripts\aider.exe','..\.aider_venv\Scripts\aider.exe','..\.jarvis_core.venv\Scripts\aider.exe','aider') |
        Where-Object { Test-Path $_ } | Select-Object -First 1
 if(-not $exe){ throw 'aider.exe not found. Install to .\.aider_venv or %USERPROFILE%\.aider_venv' }
 
 # ---- Guardrail allowlist ----
-$allow = '^README\.md$','^\.aider\.conf\.yml$','^\.gitattributes$','^CONTRIBUTING\.md$','^tools/selfcheck\.ps1$','^tools/new_task\.ps1$','^tools/pull_inbox\.ps1$','^tools/orchestrator\.ps1$','^tools/prove\.ps1$','^tools/.*\.md$','^ai_tasks/.*\.md$','^ai_tasks/done/.*','^ai_tasks/failed/.*','^docs/.*'
+$allow = @(
+  '^README\.md$','^\.aider\.conf\.yml$','^\.gitattributes$','^\.gitignore$',
+  '^CONTRIBUTING\.md$','^tools/selfcheck\.ps1$','^tools/new_task\.ps1$',
+  '^tools/pull_inbox\.ps1$','^tools/orchestrator\.ps1$','^tools/prove\.ps1$',
+  '^tools/.*\.md$','^ai_tasks/.*\.md$','^ai_tasks/done/.*','^ai_tasks/failed/.*',
+  '^docs/.*','^logs/.*','^ai_inbox/.*'
+)
 function Is-Suspicious([string]$name){ foreach($rx in $allow){ if($name -match $rx){ return $false } } return $true }
 
 # ---- Parse FILES: blok ----
@@ -70,13 +77,24 @@ function Archive-Task([string]$taskFile,[string]$state){
   }
 }
 
-# ---- Kør tasks ----
+# ---- Hj?lpere ----
+function IsLikelyPath([string]$p){
+  if([string]::IsNullOrWhiteSpace($p)){ return $false }
+  $p = $p.Trim()
+  if($p.StartsWith('"') -and $p.EndsWith('"')){ $p = $p.Substring(1, $p.Length-2) }
+  if($p -match '^\- '){ $p = $p.Substring(2) }
+  $bad = [IO.Path]::GetInvalidPathChars() -join ''
+  if($p.IndexOfAny($bad.ToCharArray()) -ge 0){ return $false }
+  return $true
+}
+
+# ---- K?r tasks ----
 $todo = Get-ChildItem $TasksDir -Filter *.md -File | Where-Object { $_.Name -notlike '_repair_*' } | Sort-Object Name
 foreach($t in $todo){
   Write-Host "`n=== TASK: $($t.Name) ===" -ForegroundColor Cyan
   $pre = (git rev-parse HEAD).Trim()
 
-  # Kræv FILES:
+  # Kr?v FILES:
   [string[]]$taskFiles = @(Get-TaskFiles $t.FullName)
   if(-not $taskFiles -or $taskFiles.Count -eq 0){
     Write-Host 'Task mangler FILES:-liste -> markeres failed' -ForegroundColor Yellow
@@ -85,11 +103,11 @@ foreach($t in $todo){
     continue
   }
 
-  # Begræns Aider med --file args
+  # Begr?ns Aider med --file args og undg? at den r?rer .gitignore
   $fileArgs=@(); foreach($f in $taskFiles){ $fileArgs += @('--file', $f) }
-  & $exe --config .aider.conf.yml --message-file $t.FullName @fileArgs --yes-always --no-show-model-warnings --subtree-only
+  & $exe --config .aider.conf.yml --message-file $t.FullName @fileArgs --yes-always --no-show-model-warnings --no-gitignore --subtree-only
 
-  # Reparationer ved røde tests
+  # Reparationer ved r?de tests
   $ok=$false
   for($i=0; $i -le $MaxFixes; $i++){
     & powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\prove.ps1
@@ -100,7 +118,7 @@ foreach($t in $todo){
       'Do NOT create new files except README.md and tools/*.ps1.',
       'Run tests and commit only when green.'
     )
-    & $exe --config .aider.conf.yml --message-file $tmp @fileArgs --yes-always --no-show-model-warnings --subtree-only
+    & $exe --config .aider.conf.yml --message-file $tmp @fileArgs --yes-always --no-show-model-warnings --no-gitignore --subtree-only
   }
 
   if(-not $ok){
@@ -109,7 +127,7 @@ foreach($t in $todo){
     continue
   }
 
-  # Revert ændringer UDENFOR taskens FILES:
+  # Revert ?ndringer UDENFOR taskens FILES:
   [array]$changed = @(git diff --name-only "$pre" HEAD 2>$null)
   $extra=@()
   foreach($c in $changed){
@@ -126,14 +144,16 @@ foreach($t in $todo){
       Archive-Task -taskFile $t.FullName -state 'fail'
       continue
     }
+  } else {
+    Write-Host 'No changes - skipping external revert.' -ForegroundColor DarkGray
   }
 
-  # Guardrail: fjern uønskede tilføjede filer (udenfor allowlist)
+  # Guardrail: fjern u?nskede tilf?jede filer (udenfor allowlist)
   if($changed.Count -gt 0){
     $bad = $changed | Where-Object { Is-Suspicious $_ }
     if($bad.Count -gt 0){
       git rm -f -- $bad | Out-Null
-      git commit -m 'chore(ai): remove stray files from auto-run' | Out-Null
+      git commit -m 'chore(ai): remove stray files from auto-run' 2>$null | Out-Null
     }
   } else {
     Write-Host 'No changes - skipping guardrail.' -ForegroundColor DarkGray
@@ -145,12 +165,9 @@ foreach($t in $todo){
     if($un){
       $toDel = @()
       foreach($line in $un){
-        if(-not $line){ continue }
-        $p = $line.Trim()
-        if($p.Length -eq 0){ continue }
-        if($p.StartsWith('"') -and $p.EndsWith('"')){ $p = $p.Substring(1, $p.Length-2) }
-        if($p -match '^\- '){ $p = $p.Substring(2) }
-        if(Is-Suspicious $p){ $toDel += $p }
+        if(IsLikelyPath $line){
+          if(Is-Suspicious $line){ $toDel += $line }
+        }
       }
       foreach($u in $toDel){ try{ if(Test-Path -LiteralPath $u){ Remove-Item -LiteralPath $u -Force -Recurse -EA SilentlyContinue } }catch{} }
       if($toDel.Count -gt 0){
