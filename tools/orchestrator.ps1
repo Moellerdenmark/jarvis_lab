@@ -98,6 +98,24 @@ try {
   # --- Intake + loop ---
   & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tools\pull_inbox.ps1")
   & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tools\ai_loop.ps1")
+  # --- Post-sanitize & sanity test (auto-fix README) ---
+  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tools\post_sanitize.ps1")
+  if ($LASTEXITCODE -ne 0) { Write-Host "Post-sanitize fejlede" -ForegroundColor Yellow }
+
+  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tools\tests\readme_sanity.ps1")
+  $tests_ok = ($LASTEXITCODE -eq 0)
+
+  # stage/commit hvis post_sanitize ændrede noget
+  $dirty = (& git -C $repoRoot status --porcelain).Trim()
+  if ($dirty) {
+    & git -C $repoRoot add README.md
+    try { & git -C $repoRoot commit -m "fix: normalize README markers and fences" | Out-Null } catch {}
+  }
+
+  if (-not $tests_ok) {
+    Write-Host "Sanity tests failed; skipping push/PR." -ForegroundColor Yellow
+    return
+  }
 
   # Efter AI-loop kan branch v?re skiftet
   $branch = (& git -C $repoRoot rev-parse --abbrev-ref HEAD).Trim()
@@ -153,3 +171,4 @@ finally {
   } catch {}
   try { if (Test-Path $LockPath) { Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue } } catch {}
 }
+

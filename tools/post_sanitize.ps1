@@ -1,0 +1,34 @@
+param([string]$RepoRoot)
+$ErrorActionPreference = "Stop"
+if (-not $RepoRoot) { $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path }
+$readme = Join-Path $RepoRoot 'README.md'
+if (-not (Test-Path $readme)) { Write-Host "Post-sanitize: README.md not found"; exit 0 }
+
+# Read
+$txt = Get-Content -Raw -Encoding UTF8 $readme
+
+# Markers -> ✓
+$txt = [regex]::Replace($txt, 'PS-only pipeline\s*\?+', 'PS-only pipeline ✓✓')
+$txt = [regex]::Replace($txt, 'Jarvis self-build\s*\?+', 'Jarvis self-build ✓')
+
+# Balance triple backticks
+$fences = [regex]::Matches($txt,'```').Count
+if (($fences % 2) -ne 0) {
+  $lines = $txt -split "`r?`n"
+  # find sidste ikke-tomme linje
+  $lastIdx = -1
+  for ($i=$lines.Length-1; $i -ge 0; $i--) { if ($lines[$i] -match '\S') { $lastIdx = $i; break } }
+  if ($lastIdx -ge 0 -and $lines[$lastIdx].Trim() -eq '```') {
+    $lines[$lastIdx] = ''
+    $txt = ($lines -join "`r`n").TrimEnd() + "`r`n"
+  } else {
+    if (-not $txt.EndsWith("`r`n") -and -not $txt.EndsWith("`n")) { $txt += "`r`n" }
+    $txt += "```" + "`r`n"
+  }
+}
+
+# Trailing newline
+if (-not $txt.EndsWith("`r`n") -and -not $txt.EndsWith("`n")) { $txt += "`r`n" }
+
+Set-Content -Path $readme -Value $txt -Encoding UTF8
+Write-Host "Post-sanitize: OK"
