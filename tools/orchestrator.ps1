@@ -169,6 +169,16 @@ catch {
     }
   } catch {}
 }
+  # --- Auto-merge any open PR for this branch (best-effort) ---
+  $gh = Get-Command gh -EA SilentlyContinue
+  if ($gh) {
+    try {
+      & $gh.Source pr view $branch 1>$null 2>$null
+      if ($LASTEXITCODE -eq 0) {
+        & $gh.Source pr merge --squash --auto $branch 1>$null 2>$null
+      }
+    } catch {}
+  }
 finally {
   try { Stop-Transcript | Out-Null } catch {}
   try {
@@ -180,6 +190,7 @@ finally {
   } catch {}
   try { if (Test-Path $LockPath) { Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue } } catch {}
 }
+
 
 
 
