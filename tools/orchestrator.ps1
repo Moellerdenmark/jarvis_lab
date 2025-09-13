@@ -102,3 +102,4 @@ finally {
   try { if (Test-Path $LockPath) { Remove-Item -LiteralPath $LockPath -Force } } catch {}
   Write-Host ("Log saved to " + $logPath) -ForegroundColor Cyan
 }
+
