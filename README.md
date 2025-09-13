@@ -1,4 +1,4 @@
-﻿# AI loop test
+# AI loop test
 
 ## Run the AI loop
 ```powershell

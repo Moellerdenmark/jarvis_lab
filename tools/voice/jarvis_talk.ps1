@@ -12,7 +12,9 @@ $cfg = @{}; if (Test-Path $cfgPath) { $cfg = Import-PowerShellDataFile $cfgPath 
 $LlmUrl   = $cfg.LlmUrl   ; if (-not $LlmUrl)   { $LlmUrl   = "http://127.0.0.1:11434" }
 $LlmModel = $cfg.LlmModel ; if (-not $LlmModel) { $LlmModel = "llama3.1:8b" }
 $Whisper  = $cfg.WhisperUrl
-$outDir   = Join-Path $repoRoot ($cfg.OutDir ? $cfg.OutDir : "out\voice")
+$piperExe = $cfg.PiperExe
+$piperVoice = $cfg.PiperVoice
+$outDir   = Join-Path $repoRoot ($cfg.OutDir ? $cfg.OutDir : "out\\voice")
 New-Item -ItemType Directory -Force $outDir | Out-Null
 
 # STT (valgfri WAV) / tekstinput
@@ -48,7 +50,7 @@ try {
 # OutWav sti
 if (-not $OutWav) { $OutWav = Join-Path $outDir ("jarvis_" + (Get-Date -Format 'yyyyMMdd_HHmmss') + ".wav") }
 
-# TTS: System.Speech (offline) -> fallback: lille tone-WAV
+# TTS: Piper CLI -> fallback: lille tone-WAV
 function New-SineWaveWav([string]$Path,[int]$ms=800,[int]$hz=440,[int]$rate=16000){
   $samples = [int]($rate * ($ms/1000.0))
   $blockAlign = 2; $byteRate = $rate * $blockAlign; $subchunk2 = $samples * $blockAlign; $chunkSize = 36 + $subchunk2
@@ -63,17 +65,18 @@ function New-SineWaveWav([string]$Path,[int]$ms=800,[int]$hz=440,[int]$rate=1600
 }
 
 $ok = $false
-try {
-  Add-Type -AssemblyName System.Speech -ErrorAction Stop
-  $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
-  $synth.SetOutputToWaveFile($OutWav)
-  $synth.Speak($reply)
-  $synth.Dispose()
-  $ok = $true
-} catch {
-  Write-Host "System.Speech ikke tilgængelig – genererer tone som placeholder." -ForegroundColor Yellow
-  New-SineWaveWav -Path $OutWav
-  $ok = $true
+if (Test-Path $piperExe) {
+  try {
+    $cmd = "& `"$piperExe`" --model $piperVoice --text ""$reply"" --output_file `"$OutWav`""
+    Invoke-Expression -Command $cmd
+    $ok = $true
+  } catch {
+    Write-Host "Piper ikke tilgængelig – genererer tone som placeholder." -ForegroundColor Yellow
+    New-SineWaveWav -Path $OutWav
+    $ok = $true
+  }
+} else {
+  throw "PiperExe not found. Please set the correct path in tools/models.psd1."
 }
 
 if (-not (Test-Path $OutWav)) { throw "Kunne ikke lave WAV: $OutWav" }

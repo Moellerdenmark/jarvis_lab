@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $cfgPath  = Join-Path $repoRoot "tools\models.psd1"
 $cfg = @{}; if (Test-Path $cfgPath) { $cfg = Import-PowerShellDataFile $cfgPath }
-$outDir = Join-Path $repoRoot ($cfg.OutDir ? $cfg.OutDir : "out\voice")
+$outDir = Join-Path $repoRoot ($cfg.OutDir ? $cfg.OutDir : "out\\voice")
 
 & pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot "tools\voice\jarvis_talk.ps1") -InputText "Hej Jarvis" -NoPlay
 
