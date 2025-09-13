@@ -23,9 +23,18 @@ if ($last) {
 }
 
 Write-Host ""
+Write-Host ""
 Write-Host "Scheduler:" -ForegroundColor DarkGray
 try {
-  schtasks /Query /TN JarvisAutoDev /V /FO LIST | Out-String | Write-Host
+  $old = $ErrorActionPreference; $ErrorActionPreference='Continue'
+  $raw = schtasks /Query /TN JarvisAutoDev /V /FO LIST 2>&1 | Out-String
+  $ErrorActionPreference = $old
+  if ($raw -match 'ERROR:') {
+    Write-Host "  (task 'JarvisAutoDev' not found)" -ForegroundColor DarkGray
+  } else {
+    $raw | Write-Host
+  }
 } catch {
   Write-Host "  (task 'JarvisAutoDev' not found)" -ForegroundColor DarkGray
 }
+
