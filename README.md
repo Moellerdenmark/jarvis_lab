@@ -15,3 +15,4 @@ Autopilot is live.
 Service scheduler OK.
 PS-only pipeline ✓
 
+Jarvis self-build ?
