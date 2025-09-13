@@ -1,0 +1,18 @@
+model: ollama/qwen2.5-coder:7b
+no-analytics: true
+subtree-only: true
+aiderignore: .aiderignore
+auto-commits: true
+auto-test: true
+test-cmd: powershell -NoProfile -ExecutionPolicy Bypass -File tools\prove.ps1
+
+
+
+
+
+weak-model: ollama/qwen2.5-coder:7b
+max-chat-history-tokens: 1024
+map-tokens: 512
+timeout: 1200
+
+

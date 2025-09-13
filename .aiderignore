@@ -1,0 +1,32 @@
+# Aider ignore (safe)
+.venv/
+.aider_venv/
+venvs/
+__pycache__/
+*.pyc
+logs/
+out/
+data/
+models/
+open-webui/**
+piper*/
+piper_py/**
+Jarvis_deployment_pack/**
+backup-*/**
+*.srt
+*.vtt
+*.tsv
+*.json
+*.txt
+*.zip
+*.tar
+*.gz
+*.wav
+*.mp3
+*.mp4
+tools/selfcheck.ps1
+tools/selfcheck.ps1
+tools/selfcheck.ps1
+
+# Ensure PS scripts are included even if tools/ is ignored
+!tools/*.ps1
