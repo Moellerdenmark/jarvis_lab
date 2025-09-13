@@ -74,7 +74,7 @@ try {
       & gh auth status 1>$null 2>$null
       if ($LASTEXITCODE -eq 0) {
         $head = (git rev-parse --abbrev-ref origin/HEAD 2>$null)
-        $base = "main"; if ($head -and $head -match "origin/(.+)$") { $base = $Matches[1] }
+  $base = "autopilot_main"
         if ($branch -ne $base) {
           try { & gh pr create --head $branch --base $base --title ("Jarvis Autodev: " + $branch) --body "Automated changes by orchestrator." | Out-Null } catch {}
         }
@@ -102,4 +102,5 @@ finally {
   try { if (Test-Path $LockPath) { Remove-Item -LiteralPath $LockPath -Force } } catch {}
   Write-Host ("Log saved to " + $logPath) -ForegroundColor Cyan
 }
+
 
