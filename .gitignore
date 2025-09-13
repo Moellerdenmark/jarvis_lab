@@ -1,0 +1,6 @@
+.aider*
+logs/
+ai_inbox/
+ai_tasks/_repair_*.txt
+ai_tasks/done/
+ai_tasks/failed/
