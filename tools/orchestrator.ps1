@@ -562,10 +562,10 @@ finally {
 .Exception.Message
     if ([string]::IsNullOrWhiteSpace($msg) -or
         $msg -match 'Everything up-to-date' -or
-        $msg -match ''^\s*remote:'' -or
-        $msg -match ''^\s*To\s+github\.com:'' -or
-        $msg -match ''gh\.io/lfs'' -or
-        $msg -match ''warning:\s+See\s+https?://gh\.io/lfs'') {
+        $msg -match '^\s*remote:' -or
+        $msg -match '^\s*To\s+github\.com:' -or
+        $msg -match 'gh\.io/lfs' -or
+        $msg -match 'warning:\s+See\s+https?://gh\.io/lfs') {
       Write-Host ("Note: " + $msg) -ForegroundColor DarkGray
     } else {
       Write-Host ("Orchestrator error: " + $msg) -ForegroundColor Red
