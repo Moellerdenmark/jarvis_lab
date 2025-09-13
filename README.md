@@ -11,3 +11,5 @@ To run the AI loop, execute the following command in your terminal:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\ai_loop.ps1
 ```
 Autopilot is live.
+
+Service scheduler OK.
