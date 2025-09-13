@@ -29,3 +29,6 @@ PS-only pipeline ✓✓
 
 PS-only pipeline ✓✓
 
+PS-only pipeline ✓✓
+PS-only pipeline ✓✓
+
