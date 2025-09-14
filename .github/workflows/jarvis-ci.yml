@@ -1,0 +1,27 @@
+name: Jarvis CI
+on:
+  pull_request:
+    branches: [ autopilot_main, main ]
+  workflow_dispatch:
+
+jobs:
+  sanity:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: README sanity
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'README.md')) { throw 'README.md mangler' }
+  voice_smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Voice smoke (optional)
+        shell: pwsh
+        run: |
+          if (Test-Path 'tools\tests\voice_smoke.ps1') {
+            pwsh -NoProfile -ExecutionPolicy Bypass -File tools\tests\voice_smoke.ps1
+          } else {
+            Write-Host 'skip voice_smoke'
+          }
