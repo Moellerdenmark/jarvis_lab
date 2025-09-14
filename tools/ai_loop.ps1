@@ -18,7 +18,7 @@ try{
 
 # ---- Baseline tests ----
 & powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\prove.ps1
-if ($LASTEXITCODE -ne 0) { Write-Host "Baseline test FAILED – continuing (dev mode)" -ForegroundColor Yellow }
+if ($LASTEXITCODE -ne 0) { Write-Host "Baseline test FAILED - continuing (dev mode)" -ForegroundColor Yellow }
 
 # ---- Mapper ----
 if(-not (Test-Path $TasksDir)){ New-Item -ItemType Directory -Force -Path $TasksDir | Out-Null }
@@ -181,6 +181,4 @@ foreach($t in $todo){
 
   Archive-Task -taskFile $t.FullName -state 'ok'
 }
-
-Write-Host "`nAll tasks processed on branch $branch" -ForegroundColor Green
-
+Write-Host ([Environment]::NewLine + "All tasks processed on branch $branch") -ForegroundColor Green
