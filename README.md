@@ -1,4 +1,4 @@
-# AI loop test
+﻿# AI loop test
 
 ## Run the AI loop
 ```powershell
@@ -42,3 +42,10 @@ Eksempler:
   `pwsh -File tools/voice/jarvis_talk.ps1 -InputWav .\sample.wav`
 - Smoke-test:  
   `pwsh -File tools/tests/voice_smoke.ps1`
+
+
+
+
+
+
+
