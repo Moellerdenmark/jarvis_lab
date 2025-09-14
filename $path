@@ -1,0 +1,12 @@
+param([string]$Repo="C:\Users\gubbi\jarvis_ai",[string]$Title="custom_task",[string]$Body="Plan: Beskriv hvad der skal ske.")
+$inbox = Join-Path $Repo 'ai_inbox'; New-Item -ItemType Directory -Force -Path $inbox | Out-Null
+$now = Get-Date -Format 'yyyyMMdd_HHmmss'
+$nums = (Get-ChildItem $inbox -File -Filter '*.md' | % { if($_.Name -match '^(\d{3})'){ [int]$matches[1] } }) + @(-1)
+$next = '{0:d3}' -f ((($nums | Measure -Maximum).Maximum + 1))
+$name = "$($next)_$Title_$now.md"
+$path = Join-Path $inbox $name
+@"
+$name
+------------------------------------------------------------
+
+$Body

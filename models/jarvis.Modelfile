@@ -1,0 +1,2 @@
+FROM qwen2.5:3b-instruct
+# (valgfrit) SYSTEM kan injiceres direkte, men vi holder systemprompt i filerne ovenfor.

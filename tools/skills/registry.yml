@@ -1,0 +1,3 @@
+hello_world:
+  path: tools\skills\hello_world.ps1
+  allowed: true

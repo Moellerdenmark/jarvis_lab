@@ -1,35 +1,4 @@
 param([string]$TasksDir = "ai_tasks", [int]$MaxFixes = 1)
-
-# ----- Jarvis smart prelude (logging + retrieval) -------------------------
-try {
-  Import-Module (Join-Path $PSScriptRoot 'lib\prompt.psm1')     -Force
-  Import-Module (Join-Path $PSScriptRoot 'lib\retrieval.psm1')  -Force
-  Import-Module (Join-Path $PSScriptRoot 'lib\config.psm1')     -Force
-
-  $cfg = Get-JarvisConfig
-  $sys = Get-SystemPrompt
-  Write-Host ("SYSTEM_PROMPT: len={0}" -f $sys.Length)
-
-  $Global:__JARVIS_RETRIEVAL = ''
-  if ($cfg.ContainsKey('EnableRetrieval') -and $cfg.EnableRetrieval) {
-    if ($PSBoundParameters.ContainsKey('TaskFile') -and $TaskFile) {
-      $q = [IO.Path]::GetFileNameWithoutExtension($TaskFile)
-    } else {
-      $q = 'jarvis'
-    }
-    $sn = @()
-    try { $sn = Select-Snippets -Query $q -Max 3 } catch {}
-    Write-Host ("RETRIEVAL: {0} snippet(s)" -f $sn.Count)
-    if ($sn.Count -gt 0) {
-      $Global:__JARVIS_RETRIEVAL = (($sn | ForEach-Object { 'CONTEXT: ' + $_.preview }) -join "`n")
-    }
-  }
-
-  $Global:__JARVIS_SYSTEMPROMPT = $sys
-} catch {
-  Write-Host "[warn] prelude failed: $($_.Exception.Message)"
-}
-# ----- end prelude --------------------------------------------------------
 $ErrorActionPreference = "Stop"
 
 if (-not (Test-Path ".git")) { throw "Run in the jarvis_ai git worktree." }
@@ -214,4 +183,3 @@ foreach($t in $todo){
 }
 
 Write-Host "`nAll tasks processed on branch $branch" -ForegroundColor Green
-
