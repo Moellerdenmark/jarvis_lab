@@ -1,0 +1,9 @@
+Jarvis-Orchestrate: C:\Users\gubbi\jarvis_lab\tools\lab_helpers.ps1:96
+Line |
+  96 |      Jarvis-Orchestrate -Goal $Goal -Approve -MaxRounds $MaxRounds
+     |      ~~~~~~~~~~~~~~~~~~
+     | The term 'Jarvis-Orchestrate' is not recognized as a name of a cmdlet, function, script file, or executable
+     | program. Check the spelling of the name, or if a path was included, verify that the path is correct and try
+     | again.
+
+

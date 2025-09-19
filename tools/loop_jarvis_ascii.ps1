@@ -1,0 +1,228 @@
+param(
+  [switch]$Test,
+  [string]$SttCmd = "C:\Users\gubbi\jarvis_core\tools\stt.ps1",
+  [string]$TtsCmd = "C:\Users\gubbi\jarvis_core\tools\speak.ps1",
+  [int]$SttTimeoutSec = 12,
+  [int]$TtsTimeoutSec = 12,
+  [string]$SttFile = "C:\Users\gubbi\jarvis_core\out\listen\last_stt.txt",
+  [string]$Voice = "jarvis",
+  [int]$Rate = 0,
+  [int]$Volume = 100,
+  [switch]$ForceDevice,
+  [string]$DeviceName = "Microphone (Jabra SPEAK 510 USB)",
+  [int]$ListenSeconds = 10
+)
+
+$script:RE_WAKEWORD_ONLY = "^(?i)\s*(hej|hey)\s+jarvis\s*[?.!,:;\-]*\s*$"
+$script:RE_JARVIS_ONLY   = "^(?i)\s*jarvis\s*[?.!,:;\-]*\s*$"
+
+function Invoke-PwshFile {
+  param(
+    [Parameter(Mandatory=$true)][string]$File,
+    [string[]]$ArgList = @(),
+    [int]$TimeoutSec = 12
+  )
+  if (-not (Test-Path $File)) { return $false,$null,"not found: $File" }
+
+  $pwsh = $null
+  try { $cmd = Get-Command -Name pwsh -ErrorAction Stop; if ($cmd) { $pwsh = $cmd.Source } } catch { }
+  if (-not $pwsh) { $pwsh = Join-Path $PSHOME 'powershell.exe' }
+
+  function QuoteArg([string]$s){ '"' + ($s -replace '"','`"') + '"' }
+  $parts = @("-ExecutionPolicy","Bypass","-File",(QuoteArg $File))
+  if ($ArgList) {
+    foreach($tok in $ArgList){
+      if ($tok -is [string] -and $tok.StartsWith("-")) { $parts += $tok } else { $parts += (QuoteArg ([string]$tok)) }
+    }
+  }
+
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName               = $pwsh
+  $psi.Arguments              = ($parts -join " ")
+  $psi.UseShellExecute        = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError  = $true
+  $psi.CreateNoWindow         = $true
+
+  $p = New-Object System.Diagnostics.Process
+  $p.StartInfo = $psi
+  [void]$p.Start()
+
+  if (-not $p.WaitForExit($TimeoutSec * 1000)) { try { $p.Kill() } catch {}; return $false,$null,"timeout" }
+
+  $out = $p.StandardOutput.ReadToEnd()
+  $err = $p.StandardError.ReadToEnd()
+  return $true,$out,$err
+}
+
+function Speak-Safe {
+  param(
+    [Parameter(Mandatory=$true)][string]$Text,
+    [string]$VoiceParam,
+    [int]$RateParam,
+    [int]$VolumeParam,
+    [int]$TimeoutSec
+  )
+  if (-not $VoiceParam)  { $VoiceParam  = $Voice }
+  if (-not $RateParam)   { $RateParam   = $Rate }
+  if (-not $VolumeParam) { $VolumeParam = $Volume }
+  if (-not $TimeoutSec)  { $TimeoutSec  = $TtsTimeoutSec }
+
+  if (Test-Path $TtsCmd) {
+    $args = @('-Text',$Text,'-Voice',$VoiceParam,'-Rate',[string]$RateParam,'-Volume',[string]$VolumeParam)
+    $ok,$o,$e = Invoke-PwshFile -File $TtsCmd -ArgList $args -TimeoutSec $TimeoutSec
+    if (-not $ok) { Write-Host ("TTS error/timeout: {0}" -f $e) -ForegroundColor Yellow; Write-Host ("TTS(dummy): {0}" -f $Text) }
+  } else {
+    Write-Host ("TTS path not found: {0}" -f $TtsCmd) -ForegroundColor Yellow
+    Write-Host ("TTS(dummy): {0}" -f $Text)
+  }
+}
+
+function Get-Utf8File {
+  param([Parameter(Mandatory=$true)][string]$Path)
+  if (-not (Test-Path $Path)) { return $null }
+  try { $bytes = [System.IO.File]::ReadAllBytes($Path); return [System.Text.Encoding]::UTF8.GetString($bytes) }
+  catch { return Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue }
+}
+
+function Clean-Text([string]$s){
+  if ($null -eq $s) { return $null }
+  # Fjern BOM, zero-width og NBSP ? brug regex -replace (ikke .Replace(char,char))
+  $s = $s -replace '\uFEFF',''
+  $s = $s -replace '[\u200B-\u200D]',''
+  $s = $s -replace '\u00A0',' '
+  return $s
+}
+
+function Run-STT-Once {
+  param([int]$TimeoutSec = $SttTimeoutSec)
+
+  if (-not (Test-Path $SttCmd)) { Write-Host ("STT path not found: {0}" -f $SttCmd) -ForegroundColor Red; return $null }
+
+  $logPath = "C:\Users\gubbi\jarvis_core\out\listen\stt_debug.log"
+  try { New-Item -ItemType Directory -Force -Path (Split-Path $logPath) | Out-Null } catch {}
+
+  $args = @('-Mode','listen','-Seconds',[string]$ListenSeconds)
+  if ($ForceDevice) { $args += @('-Device',$DeviceName) }
+  $args = @($args | ForEach-Object { [string]$_ })
+
+  $stamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+  Add-Content -LiteralPath $logPath -Value ("[{0}] STT args: {1}" -f $stamp, ($args -join ' '))
+
+  $ok,$out,$err = Invoke-PwshFile -File $SttCmd -ArgList $args -TimeoutSec $TimeoutSec
+  Add-Content -LiteralPath $logPath -Value ("[{0}] STDOUT: {1}" -f $stamp, ([string]$out -replace "`r?`n"," "))
+
+  if (-not $ok) { Add-Content -LiteralPath $logPath -Value ("[{0}] STDERR: {1}" -f $stamp, $err); return $null }
+
+  $txt = Get-Utf8File -Path $SttFile
+  if (-not $txt) { return $null }
+  $txt = Clean-Text $txt
+  $last = ($txt -split "`r?`n" | Where-Object { $_ -ne "" } | Select-Object -Last 1)
+  if ($last) { return ($last.Trim()) }
+  return $null
+}
+
+function Get-NextUtterance {
+  param([int]$TimeoutSec = $SttTimeoutSec)
+  $null = Run-STT-Once -TimeoutSec $TimeoutSec
+  $txt = Get-Utf8File -Path $SttFile
+  if (-not $txt) { return $null }
+  $txt = Clean-Text $txt
+  $lines = $txt -split "`r?`n"
+  for ($i = $lines.Length - 1; $i -ge 0; $i--) {
+    $ln = (Clean-Text ($lines[$i].Trim()))
+    if (-not $ln) { continue }
+    if ($ln -match $script:RE_WAKEWORD_ONLY) { continue }
+    if ($ln -match $script:RE_JARVIS_ONLY)   { continue }
+    return $ln
+  }
+  return $null
+}
+
+function Process-RawInput {
+  param([string]$raw)
+
+  $raw = Clean-Text $raw
+  Write-Host ("DBG raw: {0}" -f $raw)
+
+  if ($raw -match $script:RE_WAKEWORD_ONLY -or $raw -match $script:RE_JARVIS_ONLY) {
+    Speak-Safe -Text "Jeg lytter..."
+    Write-Host "Wakeword -> start STT"
+    $next = Get-NextUtterance -TimeoutSec ($SttTimeoutSec + 8)
+    if ($next -and $next -notmatch $script:RE_WAKEWORD_ONLY -and $next -notmatch $script:RE_JARVIS_ONLY) {
+      Speak-Safe -Text ("OK - I heard: {0}" -f $next)
+    }
+    return
+  }
+
+  if ($raw -match "(?i)\b(hej|hey)\s+jarvis\b") {
+    $content = ($raw -replace "(?i)\b(hej|hey)\s+jarvis\b","")
+    $trimChars = @([char]32,[char]45,[char]58,[char]59,[char]44,[char]46,[char]33,[char]63,[char]34,[char]39,[char]96)
+    $content = (Clean-Text ($content.Trim($trimChars)))
+    if ($content) { Write-Host ("Activated with: {0}" -f $content); Speak-Safe -Text ("OK - I heard: {0}" -f $content) }
+    else { Speak-Safe -Text "Jeg lytter..." }
+    return
+  }
+
+  Write-Host "No wakeword"
+}
+
+if ($Test) {
+  Write-Host "TEST: running"
+  $tests = @("Hej Jarvis","Hey Jarvis - status?","Jarvis, taend lyset i garagen","jarvis?","intet wakeword her","Hej Jarvis kan du sige hej paa dansk")
+  foreach ($t in $tests) { Write-Host "-----"; Write-Host ("TEST raw: {0}" -f $t); Process-RawInput -raw $t }
+  Write-Host "TEST: done"
+  exit 0
+}
+
+Write-Host "RUN: loop start (Ctrl+C to stop)"
+$lastPairHash = $null
+while ($true) {
+  try {
+    $null = Run-STT-Once -TimeoutSec $SttTimeoutSec
+    $content = Get-Utf8File -Path $SttFile
+    if ($content) {
+      $content = Clean-Text $content
+      $nz = ($content -split "`r?`n") | Where-Object { $_ -ne "" }
+      if ($nz.Count -gt 0) {
+        $last = Clean-Text $nz[$nz.Count-1]
+        $prev = if ($nz.Count -ge 2) { Clean-Text $nz[$nz.Count-2] } else { $null }
+
+        $pairPrev = if ($prev) { $prev } else { "" }
+        $pairLast = if ($last) { $last } else { "" }
+        $pair = $pairPrev + "`n" + $pairLast
+
+        $md5 = New-Object System.Security.Cryptography.MD5CryptoServiceProvider
+        $hash = [System.BitConverter]::ToString($md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($pair)))
+
+        if ($hash -ne $lastPairHash) {
+          $lastPairHash = $hash
+
+          if ($last -match $script:RE_WAKEWORD_ONLY -or $last -match $script:RE_JARVIS_ONLY) {
+            Speak-Safe -Text "Jeg lytter..."
+            $next = Get-NextUtterance -TimeoutSec ($SttTimeoutSec + 8)
+            if ($next -and $next -notmatch $script:RE_WAKEWORD_ONLY -and $next -notmatch $script:RE_JARVIS_ONLY) {
+              Speak-Safe -Text ("OK - I heard: {0}" -f $next)
+            }
+          }
+          elseif ($last -match "(?i)\b(hej|hey)\s+jarvis\b") {
+            $content2 = ($last -replace "(?i)\b(hej|hey)\s+jarvis\b","")
+            $trimChars = @([char]32,[char]45,[char]58,[char]59,[char]44,[char]46,[char]33,[char]63,[char]34,[char]39,[char]96)
+            $content2 = Clean-Text ($content2.Trim($trimChars))
+            if ($content2) { Speak-Safe -Text ("OK - I heard: {0}" -f $content2) } else { Speak-Safe -Text "Jeg lytter..." }
+          }
+          elseif ($prev -and ($prev -match $script:RE_WAKEWORD_ONLY -or $prev -match $script:RE_JARVIS_ONLY)) {
+            Speak-Safe -Text ("OK - I heard: {0}" -f $last)
+          }
+          else {
+            Write-Host "No wakeword"
+          }
+        }
+      }
+    }
+    Start-Sleep -Milliseconds 250
+  } catch {
+    Write-Host ("Loop error: {0}`nType: {1}`nTrace:`n{2}" -f $_.Exception.Message, $_.Exception.GetType().FullName, $_.ScriptStackTrace) -ForegroundColor Red
+    Start-Sleep -Milliseconds 400
+  }
+}

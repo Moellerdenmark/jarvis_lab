@@ -1,0 +1,68 @@
+param(
+  [Parameter(Mandatory=$true)][string]$SttCmd,
+  [Parameter(Mandatory=$true)][string]$TtsCmd,
+  [string]$DeviceName,
+  [int]$ListenSeconds = 5
+)
+
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding          = [System.Text.Encoding]::UTF8
+
+# Almindelige fejlhøringer af "Jarvis"
+$hotwordPatterns = @(
+  'hej\s+jarvis',
+  'hey\s+jarvis',
+  'hej\s+jervis',
+  'hej\s+javis',
+  'hej\s+tjavis',
+  'hej\s+tjaves',
+  'hej\s+djavis',
+  '\bjarvis\b'
+)
+
+function Match-Hotword([string]$text){
+  foreach($p in $hotwordPatterns){
+    $m = [regex]::Match($text, $p, 'IgnoreCase')
+    if($m.Success){ return $m }
+  }
+  return $null
+}
+
+Write-Host "RUN: hotword loop (Ctrl+C to stop)" -ForegroundColor Cyan
+
+while ($true) {
+  # Optag+STT (wrapper returnerer kun tekst som pipeline-output)
+  $raw = & pwsh -NoProfile -ExecutionPolicy Bypass -File $SttCmd `
+            -Seconds $ListenSeconds -DeviceName $DeviceName 2>$null
+  if (-not $raw) { continue }
+
+  # Rens konsol-artefakter: fjern "TRANSCRIPT:" linjer, normaliser whitespace
+  $t = ($raw -join "`n") -replace "^\s*TRANSCRIPT:\s*",""
+  $t = $t -replace "`r?`n"," "
+  $t = $t -replace "\s+"," "
+  $t = $t.Trim()
+  if (-not $t) { continue }
+
+  Write-Host ("HEARD: {0}" -f $t) -ForegroundColor Green
+
+  $m = Match-Hotword $t
+  if (-not $m) { continue }
+
+  # Alt efter hotword er kommandoen
+  $cmd = $t.Substring($m.Index + $m.Length).Trim(' ','.',',',':',';','-')
+  if (-not $cmd) {
+    & $TtsCmd -Text "Ja? Hvad skal jeg gøre?"
+    continue
+  }
+
+  Write-Host ("CMD: {0}" -f $cmd) -ForegroundColor Yellow
+  & $TtsCmd -Text ("Okay – jeg hørte: {0}" -f $cmd)
+
+  # === DINE HANDLERS HER (eksempel) ===
+  if ($cmd -match '(tænd|taend).*(lys|lyset).*stuen') {
+    & $TtsCmd -Text "Jeg tænder lyset i stuen."
+    # Kald din egentlige home-automation her
+    continue
+  }
+}

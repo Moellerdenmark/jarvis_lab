@@ -1,0 +1,67 @@
+param(
+  [string]$SttCmd = "$PSScriptRoot\stt_mic_wrapper.ps1",
+  [string]$TtsCmd = "$PSScriptRoot\speak.ps1",
+  [string]$DeviceName = "Microphone (Jabra SPEAK 510 USB)",
+  [int]$ListenSeconds = 5,
+  [string]$WakewordRegex = "(?i)^\s*(hej|hey)\s+jarvis(?:[\s,:-]+(?<rest>[^\r\n].*))?$"
+)
+
+$ErrorActionPreference = 'Stop'
+if (-not $PSScriptRoot) { $PSScriptRoot = (Split-Path -Parent $MyInvocation.MyCommand.Path); if (-not $PSScriptRoot){ $PSScriptRoot = (Get-Location).Path } }
+$OutDir = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\out\listen'))
+$LastFile = Join-Path $OutDir 'last_stt.txt'
+
+function Read-Transcript {
+  if (-not (Test-Path $LastFile)) { return '' }
+  $t = (Get-Content -LiteralPath $LastFile -Raw -Encoding utf8) -replace "^\uFEFF",""
+  # Brug kun første ikke-tomme linje
+  $line = ($t -split '\r?\n') | Where-Object { $_.Trim() } | Select-Object -First 1
+  return ($line ?? '').Trim()
+}
+function Speak([string]$msg) {
+  if ($TtsCmd -and (Test-Path $TtsCmd)) {
+    try { & pwsh -NoProfile -ExecutionPolicy Bypass -File $TtsCmd -Text $msg } catch { Write-Host ("SAY: {0}" -f $msg) -ForegroundColor Cyan }
+  } else { Write-Host ("SAY: {0}" -f $msg) -ForegroundColor Cyan }
+}
+
+Write-Host "RUN: hotword loop (Ctrl+C to stop)" -ForegroundColor Yellow
+$prevHash = ""
+while ($true) {
+  # bed wrapperen om en frisk optagelse; wrapperen rydder selv last_stt.txt
+  & pwsh -NoProfile -ExecutionPolicy Bypass -File $SttCmd -Seconds $ListenSeconds -DeviceName $DeviceName
+  $heard = Read-Transcript
+  if (-not $heard) { continue }
+
+  # undgå spam ved identisk gentagelse
+  $hash = [BitConverter]::ToString((New-Object System.Security.Cryptography.SHA1Managed).ComputeHash([Text.Encoding]::UTF8.GetBytes($heard)))
+  if ($hash -eq $prevHash) { continue }
+  $prevHash = $hash
+
+  Write-Host ("HEARD: {0}" -f $heard) -ForegroundColor Gray
+
+  $m = [regex]::Match($heard, $WakewordRegex)
+  if ($m.Success) {
+    [console]::Beep(1200,150) 2>$null
+    $rest = $m.Groups['rest'].Value.Trim()
+
+    if ($rest) {
+      Write-Host ("CMD (inline): {0}" -f $rest) -ForegroundColor Green
+      Speak ("OK – jeg hørte: {0}" -f $rest)
+      continue
+    }
+
+    Write-Host "Wakeword fanget – sig din kommando..." -ForegroundColor Green
+    Speak "Ja? Hvad skal jeg gøre?"
+    Start-Sleep -Milliseconds 250
+
+    & pwsh -NoProfile -ExecutionPolicy Bypass -File $SttCmd -Seconds $ListenSeconds -DeviceName $DeviceName
+    $cmd = Read-Transcript
+    if ($cmd) {
+      Write-Host ("CMD: {0}" -f $cmd) -ForegroundColor Green
+      Speak ("OK – jeg hørte: {0}" -f $cmd)
+      # TODO: kald dine handlinger her
+    } else {
+      Write-Warning "Ingen kommando opfanget."
+    }
+  }
+}

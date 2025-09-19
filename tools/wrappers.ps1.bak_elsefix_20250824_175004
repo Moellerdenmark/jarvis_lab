@@ -1,0 +1,866 @@
+Set-StrictMode -Version Latest
+
+function Get-GoalFile {
+  param([Parameter(Mandatory)][string]$Goal)
+  $file = 'tools/hello.ps1'
+  if ($Goal -match '(tools[\\/][\w\.-]+\.ps1)') { $file = $Matches[1] }
+  elseif ($Goal -match '([\w\.-]+\.ps1)')       { $file = "tools/$($Matches[1])" }
+  return $file
+}
+
+function Get-GoalMessage {
+  param([Parameter(Mandatory)][string]$Goal)
+  $msg = 'Hej'
+  if ($Goal -match 'skriver\s+"([^"]+)"') { $msg = $Matches[1] }
+  return $msg
+}
+
+function New-JarvisFallbackPatch {
+  param(
+    [Parameter(Mandatory)][string]$File,
+    [Parameter(Mandatory)][string]$Code
+  )
+  [pscustomobject]@{
+    actions = @(
+      [pscustomobject]@{
+        op      = 'write'
+        path    = $File
+        content = $Code
+      }
+    )
+  } | ConvertTo-Json -Depth 10
+}
+
+function ConvertFrom-JarvisPatchJson {
+  param([Parameter(Mandatory)]$Json)
+  $obj = if ($Json -is [string]) { $Json | ConvertFrom-Json } else { $Json }
+  if (-not $obj -or -not $obj.actions) { throw "Patch mangler 'actions'." }
+  return $obj
+}
+
+function Apply-JarvisPatch {
+  param([Parameter(Mandatory)]$Patch, [switch]$Approve)
+  foreach ($a in $Patch.actions) {
+    switch ($a.op) {
+      'write' {
+        $p = $a.path; $c = $a.content
+        $dir = Split-Path -Parent $p
+        if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+        if (-not $Approve) {
+          Write-Host "[DRYRUN] Ville skrive $p" -ForegroundColor Yellow
+        } else {
+          Set-Content -Path $p -Value $c -Encoding UTF8
+          Write-Host "[OK] Skrev $p" -ForegroundColor Green
+        }
+      }
+      default { throw "Ukendt op: $($a.op)" }
+    }
+  }
+}
+
+# Stub kun hvis Invoke-LLMAgent ikke findes
+if (-not (Get-Command Invoke-LLMAgent -ErrorAction SilentlyContinue)) {
+  function Invoke-LLMAgent {
+    param([string]$RoleSystem,[string]$Message,[string]$Model,[int]$TimeoutMs=60000)
+    throw "Invoke-LLMAgent er ikke tilgængelig. Kør Jarvis-Orchestrate med -NoLLM eller installer din LLM-cmdlet."
+  }
+}
+
+function Jarvis-Orchestrate {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory)][string]$Goal,
+    [switch]$Approve,
+    [switch]$NoLLM,                 # <- erstatter rå brug af $useLLM
+    [int]$Rounds = 2,               # <- erstatter rå brug af $Rounds
+    [int]$TimeoutMs = 60000,
+    [string]$Model = $env:OLLAMA_MODEL
+  )
+
+  $useLLM = -not $NoLLM
+
+  # PLAN
+  $plan = $null
+  if ($useLLM) {
+    try { $plan = Invoke-LLMAgent -RoleSystem $sysPlanner -Message $Goal -Model $Model -TimeoutMs $TimeoutMs } catch { $plan = $null }
+  }
+  if (-not $plan) {
+    $plan = 'Opret en .ps1-fil i tools/ der skriver ønsket tekst.'
+    Write-Host "[INFO] Planner fallback." -ForegroundColor Yellow
+  }
+
+  # PATCH-LOOP
+  $patchJson = $null
+  for ($round = 1; $round -le $Rounds; $round++) {
+    if ($useLLM) {
+      try {
+        $patchJson = Invoke-LLMAgent -RoleSystem $sysCoder -Message ("Mål: {0}`nPlan:`n{1}" -f $Goal, $plan) -Model $Model -TimeoutMs $TimeoutMs
+      } catch { $patchJson = $null }
+      if ($patchJson) {
+        try { $patchJson = Invoke-LLMAgent -RoleSystem $sysCritic -Message $patchJson -Model $Model -TimeoutMs $TimeoutMs } catch { }
+      }
+    }
+
+    if (-not $patchJson -or ($patchJson -is [string] -and -not $patchJson.Trim())) {
+      $file = Get-GoalFile -Goal $Goal
+      $text = Get-GoalMessage -Goal $Goal
+      $patchJson = New-JarvisFallbackPatch -File $file -Code ("Write-Host `"{0}`"" -f $text)
+      Write-Host "[INFO] Coder/Critic fallback." -ForegroundColor Yellow
+    }
+
+    try {
+      $patch = ConvertFrom-JarvisPatchJson -Json $patchJson
+      Apply-JarvisPatch -Patch $patch -Approve:$Approve
+      break
+    } catch {
+      if ($round -eq $Rounds) { throw }
+      $plan = "FORBEDRINGSNOTE: $($_.Exception.Message)`nOriginal plan:`n$plan"
+      Write-Host "[INFO] Runde $round fejlede, forsøger igen." -ForegroundColor Yellow
+      $patchJson = $null
+    }
+  }
+
+  $script:patchJson = $patchJson
+
+
+  $script:Goal      = $Goal
+
+
+  [pscustomobject]@{ Plan = $plan; PatchJson = $patchJson }
+}
+
+
+
+# ====== JARVIS MINI-HOTFIX (PS5) ======
+Remove-Item Function:\Repair-LooseJson,Function:\ConvertFrom-JarvisPatchJson,Function:\Jarvis-NormalizeRelPath,Function:\Jarvis-NormalizePs1,Function:\Jarvis-ValidatePatch -ErrorAction SilentlyContinue
+
+function Repair-LooseJson {
+  param([Parameter(Mandatory)][string]$Text)
+  $t = $Text
+  if ($t -match '```') { $t = ($t -replace '```(json|powershell|ps1|ps)?','' -replace '```','').Trim() }
+  $t = $t -replace '[\u201C\u201D]','"'
+  $t = [regex]::Replace($t, ',\s*(\}|\])', '$1')
+  $t = [regex]::Replace($t, '(?i)("path"\s*:\s*")((?:[^"\\]|\\.)*)(")', { param($m) ; $m.Groups[1].Value + ($m.Groups[2].Value -replace '\\','/') + $m.Groups[3].Value })
+  return $t
+}
+
+function ConvertFrom-JarvisPatchJson {
+  param([Parameter(Mandatory)]$Json)
+  $text = if ($Json -is [string]) { $Json } else { ($Json | ConvertTo-Json -Depth 12) }
+  if (Get-Command Jarvis-ExtractJson -ErrorAction SilentlyContinue) {
+    $clean = Jarvis-ExtractJson -Text $text; if ($clean) { $text = $clean }
+  }
+  $text = Repair-LooseJson -Text $text
+  try { $obj = $text | ConvertFrom-Json -ErrorAction Stop } catch {
+    $text2 = [regex]::Replace($text, '(?<!\\)\\(?!["\\/bfnrtu])', '\\'); $obj = $text2 | ConvertFrom-Json -ErrorAction Stop
+  }
+  if ($obj.PSObject.Properties['actions']) { return $obj }
+  if ($obj -is [System.Collections.IEnumerable]) { $arr=@($obj); if ($arr.Count -gt 0 -and $arr[0].PSObject.Properties['op']) { return [pscustomobject]@{ actions = $arr } } }
+  if ($obj.PSObject.Properties['patch'] -and $obj.patch.PSObject.Properties['actions']) { return $obj.patch }
+  $hasPath=$obj.PSObject.Properties['path']; $hasCont=$obj.PSObject.Properties['content']; $hasOp=$obj.PSObject.Properties['op']
+  if ($hasPath -and $hasCont) { return [pscustomobject]@{ actions = @([pscustomobject]@{ op = ($hasOp ? $obj.op : 'write'); path=$obj.path; content=$obj.content }) } }
+  throw "Patch mangler 'actions'."
+}
+
+function Jarvis-NormalizeRelPath {
+  param([Parameter(Mandatory)][string]$Path)
+  $p = ([string]$Path).Trim() -replace '\\','/'
+  $p = $p -replace '^\./+','' -replace '^[\\/]+',''
+  if ($p -match '^\.\.') { throw "Afvist path traversal: $p" }
+  $p = [regex]::Replace($p, '/+', '/')
+  $p = [regex]::Replace($p, '(?i)^[\\/_]*__?tools__?[\\/]', 'tools/')
+  $p = $p -replace '(^|/)tools/(?:tools/)+','${1}tools/'
+  if ($p -notmatch '/' -and $p -match '\.ps1$') { $p = 'tools/' + $p }
+  return $p
+}
+
+function Jarvis-NormalizePs1 {
+  param([Parameter(Mandatory)][string]$Content,[string]$FallbackText="Output")
+  $c = ($Content -replace '^\uFEFF','').Trim()
+  if ($c -match '```') { $c = [regex]::Replace($c, '```(?:\w+)?', ''); $c = $c.Trim() }
+  if     ($c -match "(?s)^@'(.+?)'@$") { $c = $Matches[1].Trim() }
+  elseif ($c -match '(?s)^@"(.+?)"@$') { $c = $Matches[1].Trim() }
+  if ($c -match "(?s)^@'[\s\S]*'@$") { $c = ($c -replace "^@'","" -replace "'@$","").Trim() }
+  if ($c -match '(?s)^@"[\s\S]*"@$') { $c = ($c -replace '^@"','' -replace '"@$','').Trim() }
+  if ($c -match '^\s*@echo\s+(.+)$') { $c = "Write-Output `"$($Matches[1])`"" }
+  if ($c -match '^\s*\[([^\]]+)\]\s*$') { $c = "Write-Output `"$($Matches[1])`"" }
+  if ($c -notmatch '^\s*(Write-(Host|Output)|param|function|#|Set-|Get-|New-|Remove-|\.|&|\$)') {
+    $t = ($c -replace '`\n|`\r',' ' -replace '\r?\n',' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($t)) { $t = $FallbackText }
+    $t = ($t -replace '"','``"')
+    $c = "Write-Output `"$t`""
+  }
+  if (-not $c.EndsWith("`n")) { $c += "`r`n" }
+  return $c
+}
+
+function Jarvis-ValidatePatch {
+  param([Parameter(Mandatory)]$Patch)
+  $obj = if ($Patch -is [string]) { $Patch | ConvertFrom-Json } else { $Patch }
+  if (-not $obj.actions) { throw "Patch mangler 'actions'." }
+  foreach ($a in $obj.actions) {
+    if (-not $a.op) { throw "Action uden 'op'." }
+    if ($a.path) { $a.path = Jarvis-NormalizeRelPath -Path ([string]$a.path) }
+    switch ($a.op) {
+      'write' {
+        if (-not $a.content) { throw "write kræver 'content'." }
+        if ($a.path -match '\.ps1$') {
+          $fallback = "Hej"
+          if ($a.path -match 'hello(\d+)\.ps1$') { $fallback = "Auto hilsen #$($Matches[1])" }
+          $a.content = Jarvis-NormalizePs1 -Content ([string]$a.content) -FallbackText $fallback
+          if ($a.path -match 'hello(\d+)\.ps1$') { $a.content = "Write-Output `"$fallback`"`r`n" } # tving simpelt output
+        }
+      }
+      'append'     { if (-not $a.content) { throw "append kræver 'content'." } }
+      'ensureLine' { if (-not $a.content) { throw "ensureLine kræver 'content'." } }
+      'ensureDir'  { if (-not $a.path)    { throw "ensureDir kræver 'path'." } }
+      default { throw "Ukendt op: $($a.op)" }
+    }
+  }
+  return $obj
+}
+# ====== /JARVIS MINI-HOTFIX ======
+
+# ====== JARVIS MINI-PATCH: test-target + (optional) whitelist ======
+
+# (A) Testkommando fra patch: brug SIDSTE write med .ps1 hvis muligt, ellers første write
+Remove-Item Function:\New-JarvisTestCmdFromPatch -ErrorAction SilentlyContinue
+function New-JarvisTestCmdFromPatch {
+  param($PatchJson)
+
+  # Sørg for at have et objekt med .actions uanset LLM-format
+  $pjObj = $null
+  try {
+    $pjObj = if ($PatchJson -is [string]) { ConvertFrom-JarvisPatchJson -Json $PatchJson } else { $PatchJson }
+  } catch { $pjObj = $null }
+
+  $first = $null
+  try {
+    if ($pjObj -and $pjObj.actions) {
+      $writes = $pjObj.actions | Where-Object { $_.op -eq 'write' -and $_.path }
+      if ($writes) {
+        # prioriter .ps1 og tag den SIDSTE (ofte “hovedscriptet”)
+        $first = $writes | Where-Object { $_.path -match '\.ps1$' } | Select-Object -Last 1
+        if (-not $first) { $first = $writes | Select-Object -First 1 }
+      }
+    }
+  } catch { $first = $null }
+
+  $testScript = $null
+  if ($first -and $first.path) {
+    $rel  = Jarvis-NormalizeRelPath -Path ([string]$first.path)
+    $testScript = Resolve-JarvisPath -Path $rel
+  } else {
+    # fallback til en stabil fil i tools/
+    $testScript = Resolve-JarvisPath -Path (Jarvis-NormalizeRelPath -Path 'tools/hello.ps1')
+  }
+
+  return @{ test = "powershell -ExecutionPolicy Bypass -File `"$testScript`"" } | ConvertTo-Json -Compress
+}
+
+# (B) (VALGFRIT) Whitelist af undermapper under roden – slå til ved at sætte $JARVIS_ALLOWED_SUBDIRS
+# Eksempel: $env:JARVIS_ALLOWED_SUBDIRS = 'tools,templates'
+Remove-Item Function:\Resolve-JarvisPath -ErrorAction SilentlyContinue
+function Resolve-JarvisPath {
+  param(
+    [Parameter(Mandatory)][string]$Path,
+    [string]$SafeRoot = (Get-Location).Path
+  )
+  $full = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $Path))
+  $root = [System.IO.Path]::GetFullPath($SafeRoot)
+  if (-not $full.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Blokeret: $full er udenfor SafeRoot ($root)."
+  }
+
+  $allowed = $null
+  if ($env:JARVIS_ALLOWED_SUBDIRS -and $env:JARVIS_ALLOWED_SUBDIRS.Trim()) {
+    $allowed = $env:JARVIS_ALLOWED_SUBDIRS.Split(',') | ForEach-Object { $_.Trim().TrimEnd('/','\') + '/' }
+  }
+
+  if ($allowed) {
+    $rel = $full.Substring($root.Length).TrimStart('\','/')
+    $ok = $false
+    foreach ($a in $allowed) {
+      if ($rel.StartsWith($a, [System.StringComparison]::OrdinalIgnoreCase)) { $ok = $true; break }
+    }
+    if (-not $ok) {
+      throw "Blokeret: $rel er ikke i en tilladt mappe: $($allowed -join ', ')"
+    }
+  }
+
+  return $full
+}
+
+# ====== /JARVIS MINI-PATCH ======
+
+# ====== JARVIS MINI-FIX: JSON backticks + tester uses ConvertFrom-JarvisPatchJson ======
+
+# A) Repair-LooseJson: håndter også "\`" (backslash-backtick) → "\\`"
+Remove-Item Function:\Repair-LooseJson -ErrorAction SilentlyContinue
+function Repair-LooseJson {
+  param([Parameter(Mandatory)][string]$Text)
+  $t = $Text
+  if ($t -match '```') { $t = ($t -replace '```(json|powershell|ps1|ps)?','' -replace '```','').Trim() }
+  $t = $t -replace '[\u201C\u201D]','"'
+  $t = [regex]::Replace($t, ',\s*(\}|\])', '$1')
+  # fix: backslash-backtick, som JSON ikke kender
+  $t = $t -replace '\\`','\\\\`'
+  # normalisér "path": brug forward slashes (undgår \h osv.)
+  $t = [regex]::Replace($t, '(?i)("path"\s*:\s*")((?:[^"\\]|\\.)*)(")', {
+    param($m) ; $m.Groups[1].Value + ($m.Groups[2].Value -replace '\\','/') + $m.Groups[3].Value
+  })
+  return $t
+}
+
+# B) New-JarvisTestCmdFromPatch: brug ALTID ConvertFrom-JarvisPatchJson (aldrig ConvertFrom-Json)
+Remove-Item Function:\New-JarvisTestCmdFromPatch -ErrorAction SilentlyContinue
+function New-JarvisTestCmdFromPatch {
+  param($PatchJson)
+  $pjObj = $null
+  try {
+    $pjObj = if ($PatchJson -is [string]) { ConvertFrom-JarvisPatchJson -Json $PatchJson } else { $PatchJson }
+  } catch { $pjObj = $null }
+
+  $first = $null
+  try {
+    if ($pjObj -and $pjObj.actions) {
+      $writes = $pjObj.actions | Where-Object { $_.op -eq 'write' -and $_.path }
+      if ($writes) {
+        $first = $writes | Where-Object { $_.path -match '\.ps1$' } | Select-Object -Last 1
+        if (-not $first) { $first = $writes | Select-Object -First 1 }
+      }
+    }
+  } catch { $first = $null }
+
+  $testScript = $null
+  if ($first -and $first.path) {
+    $rel  = Jarvis-NormalizeRelPath -Path ([string]$first.path)
+    $testScript = Resolve-JarvisPath -Path $rel
+  } else {
+    $testScript = Resolve-JarvisPath -Path (Jarvis-NormalizeRelPath -Path 'tools/hello.ps1')
+  }
+  return @{ test = "powershell -ExecutionPolicy Bypass -File `"$testScript`"" } | ConvertTo-Json -Compress
+}
+# ====== /JARVIS MINI-FIX ======
+
+# ====== JARVIS FIX: remove/delete + last-chance PS1-normalisering ======
+
+Remove-Item Function:\Set-JarvisContent -ErrorAction SilentlyContinue
+function Set-JarvisContent {
+  param([Parameter(Mandatory)][string]$Path,[Parameter(Mandatory)][string]$Value,[switch]$Approve,[string]$SafeRoot=(Get-Location).Path)
+  $rel  = Jarvis-NormalizeRelPath -Path $Path
+  $full = Resolve-JarvisPath -Path $rel -SafeRoot $SafeRoot
+  $dir  = Split-Path -Parent $full
+  if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+
+  # Last-chance normalisering for .ps1 (uanset upstream)
+  $val = [string]$Value
+  if ($rel -match '(?i)\.ps1$') {
+    $fallback = "Output"
+    if ($rel -match '(?i)hello(\d+)\.ps1$') { $fallback = "Auto hilsen #$($Matches[1])" }
+    $val = Jarvis-NormalizePs1 -Content $val -FallbackText $fallback
+  }
+
+  if ($Approve) {
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($full, $val, $utf8)
+    Write-Host "[OK] Skrev $full" -ForegroundColor Green
+  } else {
+    Write-Host "[DRYRUN] Ville skrive $full" -ForegroundColor Yellow
+  }
+}
+
+Remove-Item Function:\Apply-JarvisPatch -ErrorAction SilentlyContinue
+function Apply-JarvisPatch {
+  param([Parameter(Mandatory)]$Patch,[switch]$Approve)
+  $obj = if ($Patch -is [string]) { $Patch | ConvertFrom-Json } else { $Patch }
+  $obj = Jarvis-ValidatePatch -Patch $obj
+  if (-not $obj.actions) { throw "Patch mangler 'actions'." }
+
+  foreach ($a in $obj.actions) {
+    switch -Regex ($a.op) {
+      '^(ensureDir)$' {
+        $full = Resolve-JarvisPath -Path (Jarvis-NormalizeRelPath -Path $a.path)
+        if (-not (Test-Path $full)) {
+          if ($Approve) { New-Item -ItemType Directory -Force -Path $full | Out-Null; Write-Host "[OK] Mappe: $full" -ForegroundColor Green }
+          else { Write-Host "[DRYRUN] Ville oprette mappe: $full" -ForegroundColor Yellow }
+        }
+      }
+      '^(write)$' {
+        Set-JarvisContent -Path $a.path -Value ([string]$a.content) -Approve:$Approve
+      }
+      '^(append)$' {
+        $full = Resolve-JarvisPath -Path (Jarvis-NormalizeRelPath -Path $a.path)
+        $dir  = Split-Path -Parent $full
+        if ($dir -and -not (Test-Path $dir)) { if ($Approve){ New-Item -ItemType Directory -Force -Path $dir | Out-Null } }
+        $val = [string]$a.content
+        if ($a.path -match '(?i)\.ps1$') {
+          $fallback = "Output"
+          if ($a.path -match '(?i)hello(\d+)\.ps1$') { $fallback = "Auto hilsen #$($Matches[1])" }
+          $val = Jarvis-NormalizePs1 -Content $val -FallbackText $fallback
+        }
+        if ($Approve) {
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::AppendAllText($full, $val, $utf8); Write-Host "[OK] Append: $full" -ForegroundColor Green
+        } else {
+          Write-Host "[DRYRUN] Ville append'e: $full" -ForegroundColor Yellow
+        }
+      }
+      '^(ensureLine)$' {
+        $full = Resolve-JarvisPath -Path (Jarvis-NormalizeRelPath -Path $a.path)
+        $dir  = Split-Path -Parent $full
+        if ($dir -and -not (Test-Path $dir)) { if ($Approve){ New-Item -ItemType Directory -Force -Path $dir | Out-Null } }
+        $line = [string]$a.content
+        $cur  = (Test-Path $full) ? ([System.IO.File]::ReadAllLines($full)) : @()
+        if ($cur -notcontains $line) {
+          if ($Approve) {
+            $utf8 = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::AppendAllText($full, $line + [Environment]::NewLine, $utf8); Write-Host "[OK] ensureLine: $full" -ForegroundColor Green
+          } else { Write-Host "[DRYRUN] Ville ensureLine i: $full" -ForegroundColor Yellow }
+        } else { Write-Host "[SKIP] Linje findes allerede i $full" -ForegroundColor Gray }
+      }
+      '^(remove|delete)$' {
+        if (-not $a.path) { throw "remove kræver 'path'." }
+        $full = Resolve-JarvisPath -Path (Jarvis-NormalizeRelPath -Path $a.path)
+        if (Test-Path $full) {
+          if ($Approve) { Remove-Item -Force $full; Write-Host "[OK] Fjernede $full" -ForegroundColor Green }
+          else { Write-Host "[DRYRUN] Ville fjerne $full" -ForegroundColor Yellow }
+        } else {
+          Write-Host "[SKIP] Findes ikke: $full" -ForegroundColor Gray
+        }
+      }
+      default { throw "Ukendt op: $($a.op)" }
+    }
+  }
+}
+# ====== /JARVIS FIX ======
+
+# ===== FAIL-SAFE PS1 NORMALIZATION =====
+Remove-Item Function:\Jarvis-NormalizePs1 -ErrorAction SilentlyContinue
+function Jarvis-NormalizePs1 {
+  param([Parameter(Mandatory)][string]$Content,[string]$FallbackText="Output")
+  $c = ($Content -replace '^\uFEFF','').Trim()
+  if ($c -match '```') { $c = [regex]::Replace($c, '```(?:\w+)?', ''); $c = $c.Trim() }
+  if     ($c -match "(?s)^@'(.+?)'@$") { $c = $Matches[1].Trim() }
+  elseif ($c -match '(?s)^@"(.+?)"@$') { $c = $Matches[1].Trim() }
+  if ($c -match "(?s)^@'[\s\S]*'@$") { $c = ($c -replace "^@'","" -replace "'@$","").Trim() }
+  if ($c -match '(?s)^@"[\s\S]*"@$') { $c = ($c -replace '^@"','' -replace '"@$','').Trim() }
+  if ($c -match '^\s*@echo\s+(.+)$') { $c = "Write-Output `"$($Matches[1])`"" }
+  if ($c -match '^\s*\[([^\]]+)\]\s*$') { $c = "Write-Output `"$($Matches[1])`"" }
+
+  # --- FAIL-SAFE: hvis vi ser "mistænkelige" mønstre → force simpelt output ---
+  $sus = @(
+    '^\s*\$[A-Za-z_][A-Za-z0-9_]*\\',   # $var\...  (ulovligt varnavn → typisk fejl)
+    '\|\s*Out-File\b',                  # pipes til Out-File
+    '(?<![><])>\s*\S', '>>\s*\S',       # shell-redirection
+    '\b(Set-Content|Add-Content|New-Item|Remove-Item)\b',  # fil-IO
+    '\bGet-Content\b.*\|',              # indlæs + pipe videre
+    '\$PSScriptRoot\\'                   # hardcodet backslash-sti
+  )
+  foreach ($p in $sus) {
+    if ($c -match $p) {
+      $t = $FallbackText
+      $t = ($t -replace '"','``"')
+      return "Write-Output `"$t`"`r`n"
+    }
+  }
+
+  # hvis det ikke ligner "harmløs PS", så gør det til Write-Output
+  if ($c -notmatch '^\s*(Write-(Host|Output)|param|function|#|Set-|Get-|New-|Remove-|\.|&|\$[A-Za-z_][A-Za-z0-9_]*)') {
+    $t = ($c -replace '`\n|`\r',' ' -replace '\r?\n',' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($t)) { $t = $FallbackText }
+    $t = ($t -replace '"','``"')
+    $c = "Write-Output `"$t`""
+  }
+  if (-not $c.EndsWith("`n")) { $c += "`r`n" }
+  return $c
+}
+# ===== /FAIL-SAFE =====
+
+# ===== FORCE LOCAL TEST TARGET (prefer helloNN.ps1) =====
+Remove-Item Function:\New-JarvisTestCmdFromPatch -ErrorAction SilentlyContinue
+function New-JarvisTestCmdFromPatch {
+  param($PatchJson)
+  $pjObj = $null
+  try { $pjObj = if ($PatchJson -is [string]) { ConvertFrom-JarvisPatchJson -Json $PatchJson } else { $PatchJson } } catch { }
+
+  $first = $null
+  try {
+    if ($pjObj -and $pjObj.actions) {
+      $writes = $pjObj.actions | Where-Object { $_.op -eq 'write' -and $_.path }
+      if ($writes) {
+        $hello = $writes | Where-Object { $_.path -match '(?i)tools/hello\d+\.ps1$' } | Select-Object -Last 1
+        if ($hello) { $first = $hello } else {
+          $first = $writes | Where-Object { $_.path -match '\.ps1$' } | Select-Object -Last 1
+          if (-not $first) { $first = $writes | Select-Object -First 1 }
+        }
+      }
+    }
+  } catch { }
+
+  $testScript = $null
+  if ($first -and $first.path) {
+    $rel  = Jarvis-NormalizeRelPath -Path ([string]$first.path)
+    $testScript = Resolve-JarvisPath -Path $rel
+  } else {
+    $testScript = Resolve-JarvisPath -Path (Jarvis-NormalizeRelPath -Path 'tools/hello.ps1')
+  }
+  return @{ test = "powershell -ExecutionPolicy Bypass -File `"$testScript`"" } | ConvertTo-Json -Compress
+}
+
+# Hård overstyring i Invoke-JarvisTest: hvis variablen nedenfor er sat, brug ALTID lokal test-cmd
+Remove-Item Function:\Postprocess-JarvisTester -ErrorAction SilentlyContinue
+function Postprocess-JarvisTester {
+  param([object]$PatchJson,[ref]$TesterObj)
+  if ($env:JARVIS_FORCE_LOCAL_TEST -eq '1' -or -not $TesterObj.Value -or -not $TesterObj.Value.test) {
+    $local = New-JarvisTestCmdFromPatch -PatchJson $PatchJson
+    $TesterObj.Value = ($local | ConvertFrom-Json)
+  } else {
+    # normalisér -File stien til absolut
+    $TesterObj.Value.test = Normalize-JarvisTestCmd -Cmd ([string]$TesterObj.Value.test)
+  }
+}
+# ===== /FORCE LOCAL TEST =====
+
+# ===== JARVIS OVERLAY: absolute path handling + tester normalization + PS1 failsafe =====
+
+Remove-Item Function:\Jarvis-NormalizeRelPath -ErrorAction SilentlyContinue
+function Jarvis-NormalizeRelPath {
+  param([Parameter(Mandatory)][string]$Path)
+  $raw = [string]$Path
+
+  # Hvis absolut (C:\... eller UNC \\server\share\...)
+  if ($raw -match '^(?i)[A-Z]:[\\/]' -or $raw -match '^[\\/]{2}') {
+    $full = [System.IO.Path]::GetFullPath($raw)
+    $root = [System.IO.Path]::GetFullPath((Get-Location).Path)
+    if (-not $full.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+      throw "Afvist (udenfor SafeRoot): $full"
+    }
+    # lav relativ til roden
+    $rel = $full.Substring($root.Length).TrimStart('\','/')
+    $raw = $rel
+  }
+
+  # normalisering af relative stier
+  $p = $raw -replace '\\','/'
+  $p = $p -replace '^\./+',''        # drop ./...
+  $p = $p -replace '^[\\/]+',''      # drop ledende / eller \
+  if ($p -match '^\.\.') { throw "Afvist path traversal: $p" }
+  $p = [regex]::Replace($p, '/+', '/')
+  $p = [regex]::Replace($p, '(?i)^[\\/_]*__?tools__?[\\/]', 'tools/')
+  $p = $p -replace '(^|/)tools/(?:tools/)+','${1}tools/'
+  if ($p -notmatch '/' -and $p -match '\.ps1$') { $p = 'tools/' + $p }
+  return $p
+}
+
+Remove-Item Function:\Normalize-JarvisTestCmd -ErrorAction SilentlyContinue
+function Normalize-JarvisTestCmd {
+  param([Parameter(Mandatory)][string]$Cmd)
+  $m = [regex]::Match($Cmd, '(?i)-File\s+("([^"]+)"|''([^'']+)''|(\S+))')
+  if (-not $m.Success) { return $Cmd }
+
+  $raw = if     ($m.Groups[2].Success) { $m.Groups[2].Value }
+         elseif ($m.Groups[3].Success) { $m.Groups[3].Value }
+         else                           { $m.Groups[4].Value }
+
+  try {
+    $root = [System.IO.Path]::GetFullPath((Get-Location).Path)
+    if ([System.IO.Path]::IsPathRooted($raw)) {
+      $full = [System.IO.Path]::GetFullPath($raw)
+      if (-not $full.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Afvist (udenfor SafeRoot): $full"
+      }
+    } else {
+      $rel  = Jarvis-NormalizeRelPath -Path $raw
+      $full = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $rel))
+    }
+    $abs  = '"' + $full + '"'
+    $start = $m.Index; $len = $m.Length
+    return $Cmd.Remove($start,$len).Insert($start, "-File $abs")
+  } catch {
+    return $Cmd
+  }
+}
+
+# Udvid PS1-failsafe: fang også linjer der starter med "..."
+Remove-Item Function:\Jarvis-NormalizePs1 -ErrorAction SilentlyContinue
+function Jarvis-NormalizePs1 {
+  param([Parameter(Mandatory)][string]$Content,[string]$FallbackText="Output")
+  $c = ($Content -replace '^\uFEFF','').Trim()
+  if ($c -match '```') { $c = [regex]::Replace($c, '```(?:\w+)?', ''); $c = $c.Trim() }
+  if     ($c -match "(?s)^@'(.+?)'@$") { $c = $Matches[1].Trim() }
+  elseif ($c -match '(?s)^@"(.+?)"@$') { $c = $Matches[1].Trim() }
+  if ($c -match "(?s)^@'[\s\S]*'@$") { $c = ($c -replace "^@'","" -replace "'@$","").Trim() }
+  if ($c -match '(?s)^@"[\s\S]*"@$') { $c = ($c -replace '^@"','' -replace '"@$','').Trim() }
+  if ($c -match '^\s*@echo\s+(.+)$') { $c = "Write-Output `"$($Matches[1])`"" }
+  if ($c -match '^\s*\[([^\]]+)\]\s*$') { $c = "Write-Output `"$($Matches[1])`"" }
+
+  $sus = @(
+    '^\s*\$[A-Za-z_][A-Za-z0-9_]*\\',     # $var\...
+    '\|\s*Out-File\b',
+    '(?<![><])>\s*\S','>>\s*\S',
+    '\b(Set-Content|Add-Content|New-Item|Remove-Item)\b',
+    '\bGet-Content\b.*\|',
+    '\$PSScriptRoot\\',
+    '^\s*\.\.\.'                          # linjer der starter med ...
+  )
+  foreach ($p in $sus) {
+    if ($c -match $p) {
+      $t = $FallbackText
+      $t = ($t -replace '"','``"')
+      return "Write-Output `"$t`"`r`n"
+    }
+  }
+
+  if ($c -notmatch '^\s*(Write-(Host|Output)|param|function|#|Set-|Get-|New-|Remove-|\.|&|\$[A-Za-z_][A-Za-z0-9_]*)') {
+    $t = ($c -replace '`\n|`\r',' ' -replace '\r?\n',' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($t)) { $t = $FallbackText }
+    $t = ($t -replace '"','``"')
+    $c = "Write-Output `"$t`""
+  }
+  if (-not $c.EndsWith("`n")) { $c += "`r`n" }
+  return $c
+}
+# ===== /OVERLAY =====
+
+# --- hotfix: normalize actions ---
+Remove-Item Function:\Get-FirstProp -ErrorAction SilentlyContinue
+function Get-FirstProp {
+  param($Obj, [string[]]$Names)
+  if (-not $Obj) { return $null }
+  foreach ($n in $Names) {
+    $p = $Obj.PSObject.Properties[$n]
+    if ($p -and $null -ne $p.Value -and ("$($p.Value)".Trim()).Length -gt 0) { return $p.Value }
+  }
+  return $null
+}
+
+Remove-Item Function:\Normalize-JarvisPatch -ErrorAction SilentlyContinue
+function Normalize-JarvisPatch {
+  param([Parameter(Mandatory)]$Patch)
+
+  # 1) Konverter til objekt med .actions
+  $obj = $Patch
+  if ($Patch -is [string]) {
+    $obj = ConvertFrom-JarvisPatchJson -Json $Patch  # bruger eksisterende helper
+  }
+
+  if ($obj.PSObject.Properties['patch'] -and $obj.patch.PSObject.Properties['actions']) { $obj = $obj.patch }
+  if (-not $obj.PSObject.Properties['actions']) {
+    if ($obj -is [System.Collections.IEnumerable]) { $obj = [pscustomobject]@{ actions = @($obj) } }
+  }
+  if (-not $obj.PSObject.Properties['actions']) { throw "Patch mangler 'actions'." }
+
+  $out = @()
+
+  foreach ($raw in $obj.actions) {
+    $a = $raw
+
+    # 2) Strings -> simpel parsing (uden komplekse regex’er)
+    if ($a -is [string]) {
+      $s   = $a.Trim()
+      $op  = $null
+      $pth = $null
+      $txt = $null
+
+      # format: "op path: content"
+      $colon = $s.IndexOf(':')
+      if ($colon -gt 0) {
+        $lhs = $s.Substring(0, $colon).Trim()
+        $rhs = $s.Substring($colon + 1).Trim()
+        $tkn = $lhs -split '\s+', 2
+        if ($tkn.Length -ge 2) { $op = $tkn[0]; $pth = $tkn[1]; $txt = $rhs }
+      }
+      else {
+        # format: "op path [content...]"
+        $tkn = $s -split '\s+', 3
+        if ($tkn.Length -ge 2) {
+          $op  = $tkn[0]
+          $pth = $tkn[1]
+          $txt = if ($tkn.Length -ge 3) { $tkn[2] } else { '' }
+        }
+      }
+
+      if ($op -or $pth) { $a = [pscustomobject]@{ op=$op; path=$pth; content=$txt } else { $a = $null }
+    }
+
+    if (-not $a) { continue }
+
+    # 3) Aliasfelter + synonymer
+    $op  = (Get-FirstProp $a @('op','action','type'))
+    $pth = (Get-FirstProp $a @('path','file','filepath','target','name','to'))
+    $txt = (Get-FirstProp $a @('content','code','text','value','body'))
+
+    if ($null -ne $op)  { $op  = [string]$op }  else { $op  = $null }
+    if ($null -ne $pth) { $pth = [string]$pth } else { $pth = $null }
+    if ($null -ne $txt) { $txt = [string]$txt } else { $txt = '' }
+
+    if (-not $op -and $pth) { $op = 'write' }
+
+    switch (($op -as [string]).ToLowerInvariant()) {
+      'create'       { $op = 'write' }
+      'add'          { $op = 'write' }
+      'put'          { $op = 'write' }
+      'writefile'    { $op = 'write' }
+      'append_text'  { $op = 'append' }
+      'appendline'   { $op = 'append' }
+      'mkdir'        { $op = 'ensureDir' }
+      'mkpath'       { $op = 'ensureDir' }
+      'rm'           { $op = 'remove' }
+      'del'          { $op = 'remove' }
+      default        { } # behold write/append/ensureDir/ensureLine/remove hvis allerede sat
+    }
+
+    if ($op -notin @('write','append','ensureDir','ensureLine','remove')) { continue }
+    if ($op -ne 'ensureDir' -and (-not $pth)) { continue }
+    if ($op -in @('write','append','ensureLine') -and (-not $txt)) { $txt = '' }
+
+    # 4) Normaliser sti
+    $normPath = $null
+    if ($pth) {
+      try { $normPath = Jarvis-NormalizeRelPath -Path $pth } catch { continue }
+    }
+
+    $out += [pscustomobject]@{ op=$op; path=$normPath; content=$txt }
+  }
+
+  if ($out.Count -eq 0) { throw "Patch har ingen gyldige actions." }
+  return [pscustomobject]@{ actions = $out }
+}
+
+Remove-Item Function:\Jarvis-ValidatePatch -ErrorAction SilentlyContinue
+function Jarvis-ValidatePatch {
+  param([Parameter(Mandatory)]$Patch)
+
+  $obj = Normalize-JarvisPatch -Patch $Patch
+
+  foreach ($a in $obj.actions) {
+    if ($a.path) { $a.path = Jarvis-NormalizeRelPath -Path ([string]$a.path) }
+    switch ($a.op) {
+      'write' {
+        if (-not $a.content) { throw "write kræver 'content'." }
+        if ($a.path -match '\.ps1$') {
+          $fallback = 'Hej'
+          if ($a.path -match 'hello(\d+)\.ps1$') { $fallback = "Auto hilsen #$($Matches[1])" }
+          $a.content = Jarvis-NormalizePs1 -Content ([string]$a.content) -FallbackText $fallback
+          if ($a.path -match 'hello(\d+)\.ps1$') { $a.content = "Write-Output `"$fallback`"`r`n" }
+        }
+      }
+      'append'     { if (-not $a.content) { throw "append kræver 'content'." } }
+      'ensureLine' { if (-not $a.content) { throw "ensureLine kræver 'content'." } }
+      'ensureDir'  { if (-not $a.path)    { throw "ensureDir kræver 'path'." } }
+      'remove'     { }
+      default      { throw "Ukendt op: $($a.op)" }
+    }
+  }
+
+  return $obj
+}
+
+Remove-Item Function:\Normalize-JarvisPatch -ErrorAction SilentlyContinue
+function Normalize-JarvisPatch {
+  param([Parameter(Mandatory)]$Patch)
+
+  # 1) Konverter til objekt med .actions
+  $obj = $Patch
+  if ($Patch -is [string]) {
+    $obj = ConvertFrom-JarvisPatchJson -Json $Patch  # bruger din eksisterende helper
+  }
+
+  if ($obj.PSObject.Properties['patch'] -and $obj.patch.PSObject.Properties['actions']) { $obj = $obj.patch }
+  if (-not $obj.PSObject.Properties['actions']) {
+    if ($obj -is [System.Collections.IEnumerable]) { $obj = [pscustomobject]@{ actions = @($obj) } }
+  }
+  if (-not $obj.PSObject.Properties['actions']) { throw "Patch mangler 'actions'." }
+
+  $out = @()
+
+  foreach ($raw in $obj.actions) {
+    $a = $raw
+
+    # 2) Strings -> simpel parsing (uden komplekse regex'er)
+    if ($a -is [string]) {
+      $s   = $a.Trim()
+      $op  = $null
+      $pth = $null
+      $txt = $null
+
+      # format: "op path: content"
+      $colon = $s.IndexOf(':')
+      if ($colon -gt 0) {
+        $lhs = $s.Substring(0, $colon).Trim()
+        $rhs = $s.Substring($colon + 1).Trim()
+        $tkn = $lhs -split '\s+', 2
+        if ($tkn.Length -ge 2) {
+          $op  = $tkn[0]
+          $pth = $tkn[1]
+          $txt = $rhs
+        }
+      } else {
+        # format: "op path [content...]"
+        $tkn = $s -split '\s+', 3
+        if ($tkn.Length -ge 2) {
+          $op  = $tkn[0]
+          $pth = $tkn[1]
+          $txt = if ($tkn.Length -ge 3) { $tkn[2] } else { '' }
+        }
+      }
+
+      if ($op -or $pth) {
+        $a = [pscustomobject]@{
+          op      = $op
+          path    = $pth
+          content = $txt
+        }
+      } else {
+        $a = $null
+      }
+    }
+
+    if (-not $a) { continue }
+
+    # 3) Aliasfelter + synonymer
+    $op  = (Get-FirstProp $a @('op','action','type'))
+    $pth = (Get-FirstProp $a @('path','file','filepath','target','name','to'))
+    $txt = (Get-FirstProp $a @('content','code','text','value','body'))
+
+    if ($null -ne $op)  { $op  = [string]$op }  else { $op  = $null }
+    if ($null -ne $pth) { $pth = [string]$pth } else { $pth = $null }
+    if ($null -ne $txt) { $txt = [string]$txt } else { $txt = '' }
+
+    if (-not $op -and $pth) { $op = 'write' }
+
+    switch (($op -as [string]).ToLowerInvariant()) {
+      'create'       { $op = 'write' }
+      'add'          { $op = 'write' }
+      'put'          { $op = 'write' }
+      'writefile'    { $op = 'write' }
+      'append_text'  { $op = 'append' }
+      'appendline'   { $op = 'append' }
+      'mkdir'        { $op = 'ensureDir' }
+      'mkpath'       { $op = 'ensureDir' }
+      'rm'           { $op = 'remove' }
+      'del'          { $op = 'remove' }
+      default        { } # behold write/append/ensureDir/ensureLine/remove
+    }
+
+    if ($op -notin @('write','append','ensureDir','ensureLine','remove')) { continue }
+    if ($op -ne 'ensureDir' -and (-not $pth)) { continue }
+    if ($op -in @('write','append','ensureLine') -and (-not $txt)) { $txt = '' }
+
+    # 4) Normaliser sti
+    $normPath = $null
+    if ($pth) {
+      try { $normPath = Jarvis-NormalizeRelPath -Path $pth } catch { continue }
+    }
+
+    $out += [pscustomobject]@{
+      op      = $op
+      path    = $normPath
+      content = $txt
+    }
+  }
+
+  if ($out.Count -eq 0) { throw "Patch har ingen gyldige actions." }
+  return [pscustomobject]@{ actions = $out }
+}

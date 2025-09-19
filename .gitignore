@@ -1,6 +1,20 @@
-.aider*
-logs/
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Python/node/rust etc (hvis relevant)
+__pycache__/
+node_modules/
+
+# Lokale LAB ting
 ai_inbox/
-ai_tasks/_repair_*.txt
-ai_tasks/done/
-ai_tasks/failed/
+ai_tasks/_working/
+quarantine/
+logs/
+metrics/
+
+# Store filer
+voices/*.wav
+tools/*.wav

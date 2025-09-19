@@ -1,0 +1,165 @@
+# === OLLAMA DANISH WRAPPERS v5 ===
+
+function Invoke-OllamaGenerate {
+  param(
+    [Parameter(Mandatory)][string]$Model,
+    [Parameter(Mandatory)][string]$Prompt,
+    [int]$TimeoutMs = 120000,
+    [hashtable]$Options = @{ temperature=0.1; top_p=0.85; repeat_penalty=1.1; num_ctx=4096 },
+    [switch]$ReturnRaw
+  )
+  $base = $env:OLLAMA_HOST; if (-not $base) { $base = 'http://127.0.0.1:11434' }
+  $body = @{ model=$Model; stream=$false; prompt=$Prompt; options=$Options } | ConvertTo-Json -Depth 10
+  $resp = Invoke-RestMethod -Uri "$base/api/generate" -Method Post -ContentType 'application/json' -Body $body -TimeoutSec ([math]::Ceiling($TimeoutMs/1000))
+  if ($ReturnRaw) { return $resp }
+  return ($resp.response ?? '')
+}
+
+# Dansk korrektur (bevar indhold, ret sprog/ordvalg)
+function da_fix {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory)][string]$Text,
+    [string]$Model = 'llama3.1:8b',
+    [int]$TimeoutMs = 60000
+  )
+  $repl = @{
+    'taglyslampe'    = 'loftbelysning'
+    'taglyse'        = 'loftlampe'
+    'lysforrentning' = 'belysning'
+    'væggelementer'  = 'vægarmaturer'
+    'gulvlyse'       = 'gulvlys'
+    'garaget'        = 'garagen'
+  }
+  $clean = $Text
+  foreach($k in $repl.Keys){ $clean = $clean -replace [regex]::Escape($k), $repl[$k] }
+
+  $sys = "Du er korrekturlæser på dansk. Ret stavefejl og uheldige ordvalg; erstat opdigtede ord med naturlige danske fagtermer. Bevar indhold og struktur. Ingen hilsener, ingen ekstra afsnit."
+  $prompt = "System: $sys`nUser: Ret følgende til korrekt, flydende dansk (uden at ændre indholdet):`n$clean`nAssistant:"
+  Invoke-OllamaGenerate -Model $Model -Prompt $prompt -TimeoutMs $TimeoutMs -Options @{ temperature=0.05; top_p=0.9; num_ctx=4096 }
+}
+
+# Hent kun punktopstillinger fra tekst; klip til præcis N hvis muligt
+)
+}
+# fallback: lav bullets af de første N sætninger
+  $sent = ($Text -replace '\s+', ' ') -split '(?<=[\.\!\?])\s+'
+  $sent = @($sent | Where-Object { $_.Trim() -ne '' })[0..([Math]::Min($N-1, [Math]::Max($sent.Count,1)-1))]
+  if ($sent.Count -gt 0) { return ($sent | ForEach-Object { '- ' + $_.Trim() } | Select-Object -First $N) -join "`n" }
+  return $Text
+}
+
+# Generel dansk systemprompt (neutral, ingen domæneord)
+$Global:__DK_SYS_GENERAL = @"
+Skriv på flydende, korrekt dansk (rigsdansk).
+Svar kort og præcist. Ingen hilsener. Ingen engelske låneord. Ingen opdigtede ord.
+Svar kun på det, der bliver spurgt – ingen ekstra råd eller afsnit.
+"@
+
+function askdk_mini {
+  [CmdletBinding()]
+  param(
+    [Parameter(Position=0, ValueFromRemainingArguments=$true)][string[]]$Text,
+    [int]$TimeoutMs = 60000,
+    [string]$Model = 'llama3.1:8b'
+  )
+  $promptUser = ($Text -join ' ').Trim()
+
+  # Special-case: "hej fra jarvis" → præcis tekst
+  if ($promptUser -imatch '^\s*(skriv\s+)?hej fra jarvis') {
+    $final = 'Hej fra Jarvis'
+    $root='C:\Users\gubbi\jarvis_core'; $out=Join-Path (Join-Path $root 'out') 'chatgpt_last.txt'
+    if (-not (Test-Path (Split-Path $out))) { New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null }
+    $final | Set-Content -Path $out -Encoding UTF8
+    return $final
+  }
+
+  $rules = "Regel: Svar kun på det stillede spørgsmål – ingen ekstra sektioner eller forslag."
+  $full  = "System: $Global:__DK_SYS_GENERAL`n$rules`nUser: $promptUser`nAssistant:"
+  $raw   = Invoke-OllamaGenerate -Model $Model -Prompt $full -TimeoutMs $TimeoutMs -Options @{ temperature=0.08; top_p=0.9; num_ctx=4096; stop=@('System:','User:','Assistant:') }
+  $final = da_fix -Text $raw -Model $Model -TimeoutMs ([Math]::Min($TimeoutMs,90000))
+
+  $root='C:\Users\gubbi\jarvis_core'; $out=Join-Path (Join-Path $root 'out') 'chatgpt_last.txt'
+  if (-not (Test-Path (Split-Path $out))) { New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null }
+  $final | Set-Content -Path $out -Encoding UTF8
+  return $final
+}
+
+function askdk_pro {
+  [CmdletBinding()]
+  param(
+    [Parameter(Position=0, ValueFromRemainingArguments=$true)][string[]]$Text,
+    [int]$TimeoutMs = 120000,
+    [string]$Model = 'llama3.1:8b'
+  )
+  $promptUser = ($Text -join ' ').Trim()
+
+  $rules = @"
+Regler:
+- Giv præcis 3 punktopstillinger.
+- Ingen overskrift, ingen intro, ingen eftersnak. Kun de 3 punkter.
+- Kort, praktisk sprog.
+"@
+
+  $styleUser = "Giv 3 konkrete idéer til LED-lys i en 18 m² garage. Skriv kort og praktisk."
+  $styleAss  = @"
+- Loftpaneler – 2× LED-loftpanel 120×30 cm, ~36–40 W og ~3.600–4.000 lm pr. panel, 4.000 K. Montér i to baner for jævn belysning.
+- Arbejdsbord/værktøjstavle – LED-lyslister i alu-profil med mat diffuser, 24 V, ~1.000–1.500 lm/m, 4.000 K. Vinklet profil for at undgå blænding.
+- Orientering – kort LED-strip (24 V) i alu-profil ved port/reoler. PIR-sensor tænder automatisk; lavt komfortlys.
+"@
+
+  $full = @"
+System: $Global:__DK_SYS_GENERAL
+$rules
+[STYLE_EXAMPLE_START]
+User: $styleUser
+Assistant:
+$styleAss
+[STYLE_EXAMPLE_END]
+User: $promptUser
+Assistant:
+"@
+
+  $raw   = Invoke-OllamaGenerate -Model $Model -Prompt $full -TimeoutMs $TimeoutMs -Options @{ temperature=0.08; top_p=0.85; repeat_penalty=1.1; num_ctx=4096; stop=@('System:','User:','Assistant:','[STYLE_EXAMPLE_START]','[STYLE_EXAMPLE_END]') }
+  $fixed = da_fix -Text $raw -Model $Model -TimeoutMs ([Math]::Min($TimeoutMs,90000))
+  $final = Format-ExactlyNBullets -Text $fixed -N 3
+
+  $root='C:\Users\gubbi\jarvis_core'; $out=Join-Path (Join-Path $root 'out') 'chatgpt_last.txt'
+  if (-not (Test-Path (Split-Path $out))) { New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null }
+  $final | Set-Content -Path $out -Encoding UTF8
+  return $final
+}
+
+function Parse-BulletsWithContinuation {
+  param([string]$Text)
+  $lines = $Text -split "`r?`n"
+  $bullets = @()
+  $current = $null
+  foreach ($l in $lines) {
+    if ($l -match '^\s*(?:[-*•]|[0-9]+\.)\s') {
+      if ($current) { $bullets += ($current.Trim()) }
+      $current = ($l -replace '^\s*', '').Trim()
+    } elseif ($current) {
+      if ($l.Trim() -ne '') { $current += ' ' + $l.Trim() }
+    }
+  }
+  if ($current) { $bullets += ($current.Trim()) }
+  return $bullets
+}
+
+function Format-ExactlyNBullets {
+  param([string]$Text,[int]$N=3)
+  $bul = Parse-BulletsWithContinuation $Text
+  if ($bul.Count -ge $N) {
+    # Normalisér til "- " og sørg for punktum til sidst
+    $take = $bul[0..($N-1)] | ForEach-Object {
+      $t = $_
+      if ($t -notmatch '^\s*[-*•]\s') { $t = '- ' + $t.Trim() } else { $t = '- ' + ($t -replace '^\s*[-*•]\s*','') }
+      if ($t -notmatch '[\.\!\?]\s*$') { $t += '.' }
+      $t
+    }
+    return ($take -join "`n")
+  }
+  # fallback: hvis mindre end N punktopstillinger, lad da_fix-teksten være som den er
+  return $Text
+}

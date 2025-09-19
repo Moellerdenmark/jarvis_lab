@@ -1,0 +1,34 @@
+param(
+  [Parameter(Mandatory=$true)][string]$Text,
+  [int]$Rate = 0,
+  [int]$Volume = 100,
+  [string]$VoiceName # valgfrit, f.eks. "Microsoft Helle Desktop"
+)
+
+$ErrorActionPreference = 'Stop'
+
+try {
+  # COM SAPI virker stabilt i PowerShell 7
+  $sp = New-Object -ComObject SAPI.SpVoice
+  if ($VoiceName) {
+    $v = $sp.GetVoices() | Where-Object { $_.GetDescription() -like "*$VoiceName*" } | Select-Object -First 1
+    if ($v) { $sp.Voice = $v }
+  }
+  $sp.Rate   = $Rate
+  $sp.Volume = $Volume
+  # Tal synkront (vent til færdig)
+  [void]$sp.Speak($Text, 0)
+}
+catch {
+  # Faldbak: prøv Windows PowerShell 5 med System.Speech hvis COM svigter
+  powershell -NoProfile -Command @"
+Add-Type -AssemblyName System.Speech
+$s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+if ('$VoiceName' -ne '') {
+  \$v = \$s.GetInstalledVoices() | Where-Object { \$_.VoiceInfo.Name -like '*$VoiceName*' } | Select-Object -First 1
+  if (\$v) { \$s.SelectVoice(\$v.VoiceInfo.Name) }
+}
+\$s.Rate = $Rate; \$s.Volume = $Volume
+\$s.Speak([string]::Copy('$Text'))
+"@
+}

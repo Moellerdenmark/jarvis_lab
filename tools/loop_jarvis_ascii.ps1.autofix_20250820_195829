@@ -1,0 +1,292 @@
+param(
+  [switch]$Test,
+  [string]$SttCmd = "C:\Users\gubbi\jarvis_core\tools\stt.ps1",
+  [string]$TtsCmd = "C:\Users\gubbi\jarvis_core\tools\speak.ps1",
+  [int]$SttTimeoutSec = 35,   # STT: tid til optag + transskription
+  [int]$TtsTimeoutSec = 15,
+  [string]$SttFile = "C:\Users\gubbi\jarvis_core\out\listen\last_stt.txt",
+  [string]$Voice = "jarvis",
+  [int]$Rate = 0,
+  [int]$Volume = 100
+)
+
+# Wakeword-regex (enkelt linje)
+$global:RE_WAKEWORD_ONLY = "^(?i)\s*(hej|hey)\s+jarvis\s*[?.!,:;\-]*\s*$"
+$global:RE_JARVIS_ONLY   = "^(?i)\s*jarvis\s*[?.!,:;\-]*\s*$"
+
+# Kør .ps1 synkront via pwsh/powershell.exe (PS5.1-sikkert)
+function Invoke-PwshFile {
+  param(
+    [Parameter(Mandatory=$true)][string]$File,
+    [string[]]$ArgList = @(),
+    [int]$TimeoutSec = 12,
+    [string]$WorkingDir = $null
+  )
+  if (-not (Test-Path $File)) { return $false,$null,"not found: $File" }
+
+  $pwsh = $null
+  try { $cmd = Get-Command -Name pwsh -ErrorAction Stop; if ($cmd) { $pwsh = $cmd.Source } } catch {}
+  if (-not $pwsh) { $pwsh = Join-Path $PSHOME 'powershell.exe' }
+
+  $q = { param([string]$s) '"' + ($s -replace '"','`"') + '"' }
+  $argString = "-ExecutionPolicy Bypass -File " + (& $q $File)
+  if ($ArgList -and $ArgList.Count -gt 0) { $argString += " " + ($ArgList -join ' ') }
+
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName               = $pwsh
+  $psi.Arguments              = $argString
+  $psi.UseShellExecute        = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError  = $true
+  $psi.CreateNoWindow         = $true
+  if ($WorkingDir) { $psi.WorkingDirectory = $WorkingDir } else { $psi.WorkingDirectory = (Split-Path -Parent $File) }
+
+  $p = New-Object System.Diagnostics.Process
+  $p.StartInfo = $psi
+  [void]$p.Start()
+
+  if (-not $p.WaitForExit($TimeoutSec * 1000)) { try { $p.Kill() } catch {}; return $false,$null,"timeout" }
+
+  $out = $p.StandardOutput.ReadToEnd()
+  $err = $p.StandardError.ReadToEnd()
+  $ok  = ($p.ExitCode -eq 0)
+  return $ok,$out,$err
+}
+
+  $pwsh = $null
+  try {
+    $cmd = Get-Command -Name pwsh -ErrorAction Stop
+    if ($cmd) { $pwsh = $cmd.Source }
+  } catch { }
+  if (-not $pwsh) { $pwsh = Join-Path $PSHOME 'powershell.exe' }
+
+  # Quoting helper
+  $q = { param([string]$s) '"' + ($s -replace '"','`"') + '"' }
+  $argString = "-ExecutionPolicy Bypass -File " + (& $q $File)
+  if ($ArgList -and $ArgList.Count -gt 0) { $argString += " " + ($ArgList -join ' ') }
+
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName               = $pwsh
+  $psi.Arguments              = $argString
+  $psi.UseShellExecute        = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError  = $true
+  $psi.CreateNoWindow         = $true
+
+  $p = New-Object System.Diagnostics.Process
+  $p.StartInfo = $psi
+  [void]$p.Start()
+
+  if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+    try { $p.Kill() } catch {}
+    return $false,$null,"timeout"
+  }
+
+  $out = $p.StandardOutput.ReadToEnd()
+  $err = $p.StandardError.ReadToEnd()
+  return $true,$out,$err
+}
+
+function Speak-Safe {
+  param(
+    [Parameter(Mandatory=$true)][string]$Text,
+    [string]$Voice = $Voice,
+    [int]$Rate = $Rate,
+    [int]$Volume = $Volume,
+    [int]$TimeoutSec = $TtsTimeoutSec
+  )
+  if (Test-Path $TtsCmd) {
+    $q = { param([string]$s) '"' + ($s -replace '"','`"') + '"' }
+    $args = @('-Text',(& $q $Text),'-Voice',(& $q $Voice),'-Rate',$Rate,'-Volume',$Volume)
+    $ok,$o,$e = Invoke-PwshFile -File $TtsCmd -ArgList $args -TimeoutSec $TimeoutSec
+    if (-not $ok) {
+      Write-Host "TTS error/timeout: $e" -ForegroundColor Yellow
+      Write-Host "TTS(dummy): $Text"
+    }
+  } else {
+    Write-Host "TTS path not found: $TtsCmd" -ForegroundColor Yellow
+    Write-Host "TTS(dummy): $Text"
+  }
+}
+
+# Læs fil som UTF-8 uanset BOM (så 'Tænd' ikke bliver 'TÃ¦nd')
+function Get-Utf8File {
+  param([Parameter(Mandatory=$true)][string]$Path)
+  if (-not (Test-Path $Path)) { return $null }
+  try {
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    return [System.Text.Encoding]::UTF8.GetString($bytes)
+  } catch {
+    return Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+  }
+}
+
+# Kør STT én gang og returnér sidste linje RÅT (inkl. evt. wakeword). Logger altid.
+function Run-STT-Once {
+  param([int]$TimeoutSec = $SttTimeoutSec)
+
+  if (-not (Test-Path $SttCmd)) {
+    Write-Host "STT path not found: $SttCmd" -ForegroundColor Red
+    return $null
+  }
+
+  $log   = "C:\Users\gubbi\jarvis_core\out\listen\stt_debug.log"
+  $stamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+
+  # FLAD og deterministisk args-liste
+  $args = @(
+    '-Mode','listen',
+    '-Seconds','10',
+    '-Device','Microphone (Jabra SPEAK 510 USB)',
+    '-OutFile',"$SttFile"
+  )
+  try { Add-Content -LiteralPath $log -Value ("[{0}] STT args: {1}" -f $stamp, ($args -join ' ')) } catch {}
+
+  $ok,$out,$err = Invoke-PwshFile -File $SttCmd -ArgList $args -TimeoutSec $TimeoutSec
+
+  try {
+    if ($out) { Add-Content -LiteralPath $log -Value ("[{0}] STDOUT: {1}" -f $stamp, ($out -replace "`r?`n",' ')) }
+    if ($err) { Add-Content -LiteralPath $log -Value ("[{0}] STDERR: {1}" -f $stamp, ($err -replace "`r?`n",' ')) }
+  } catch {}
+
+  # Fallback hvis -OutFile ikke kendes eller gav binding-fejl
+  if (-not $ok -or ($err -match 'parameter .*OutFile' -or $out -match 'parameter .*OutFile')) {
+    $args = @('-Mode','listen','-Seconds','10','-Device','Microphone (Jabra SPEAK 510 USB)')
+    $stamp = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    try { Add-Content -LiteralPath $log -Value ("[{0}] RETRY args: {1}" -f $stamp, ($args -join ' ')) } catch {}
+    $ok,$out,$err = Invoke-PwshFile -File $SttCmd -ArgList $args -TimeoutSec $TimeoutSec
+    try {
+      if ($out) { Add-Content -LiteralPath $log -Value ("[{0}] RETRY OUT: {1}" -f $stamp, ($out -replace "`r?`n",' ')) }
+      if ($err) { Add-Content -LiteralPath $log -Value ("[{0}] RETRY ERR: {1}" -f $stamp, ($err -replace "`r?`n",' ')) }
+    } catch {}
+  }
+
+  if (-not $ok) {
+    Write-Host "STT error/timeout: $err" -ForegroundColor Yellow
+    return $null
+  }
+
+  # Læs seneste linje fra $SttFile
+  $txt = Get-Utf8File -Path $SttFile
+  if (-not $txt) { return $null }
+  $last = ($txt -split "`r?`n" | Select-Object -Last 1)
+  if ($last) { return $last.Trim() }
+  return $null
+}
+
+  # FLAD argumentliste – ingen indlejrede arrays
+  $args = @('-Mode','listen','-Seconds','10','-Device','Microphone (Jabra SPEAK 510 USB)')
+  # Log args som de faktisk sendes
+  try {
+    $logPath = "C:\Users\gubbi\jarvis_core\out\listen\stt_debug.log"
+    $stamp   = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    Add-Content -LiteralPath $logPath -Value ("[{0}] STT args: {1}" -f $stamp, ($args -join ' '))
+  } catch { }
+
+  $ok,$out,$err = Invoke-PwshFile -File $SttCmd -ArgList $args -TimeoutSec $TimeoutSec
+  if (-not $ok) {
+    Write-Host "STT error/timeout: $err" -ForegroundColor Yellow
+    return $null
+  }
+
+  $txt = Get-Utf8File -Path $SttFile
+  if (-not $txt) { return $null }
+  $last = ($txt -split "`r?`n" | Select-Object -Last 1)
+  if ($last) { return $last.Trim() }
+  return $null
+}
+
+# Find næste ytring (ignorerer rene wakewords)
+function Get-NextUtterance {
+  param([int]$TimeoutSec = $SttTimeoutSec)
+  # kør STT for at optage + opdatere fil
+  $null = Run-STT-Once -TimeoutSec $TimeoutSec
+  $txt = Get-Utf8File -Path $SttFile
+  if (-not $txt) { return $null }
+
+  $lines = $txt -split "`r?`n"
+  for ($i = $lines.Length - 1; $i -ge 0; $i--) {
+    $ln = $lines[$i].Trim()
+    if (-not $ln) { continue }
+    if ($ln -match $global:RE_WAKEWORD_ONLY) { continue }
+    if ($ln -match $global:RE_JARVIS_ONLY)   { continue }
+    return $ln
+  }
+  return $null
+}
+
+function Process-RawInput {
+  param([string]$raw)
+
+  Write-Host "DBG raw: $raw"
+
+  # Kun wakeword?
+  if ($raw -match $global:RE_WAKEWORD_ONLY -or $raw -match $global:RE_JARVIS_ONLY) {
+    Speak-Safe -Text "Jeg lytter..."
+    Write-Host "Wakeword -> start STT"
+    $next = Get-NextUtterance -TimeoutSec ($SttTimeoutSec + 10)
+    if ($null -eq $next -or $next -match $global:RE_WAKEWORD_ONLY -or $next -match $global:RE_JARVIS_ONLY) { return }
+    Speak-Safe -Text ("OK - I heard: {0}" -f $next)
+    return
+  }
+
+  # Wakeword + indhold (fx: "Hey Jarvis - status?")
+  if ($raw -match "(?i)\b(hej|hey)\s+jarvis\b") {
+    $content = ($raw -replace "(?i)\b(hej|hey)\s+jarvis\b","")
+    # Trim både ASCII og typografiske tegn
+    $trimChars = @([char]32,[char]45,[char]0x2013,[char]0x2014,[char]58,[char]59,[char]44,[char]46,[char]33,[char]63,[char]34,[char]39,[char]96)
+    $content = $content.Trim($trimChars)
+    if ($content) {
+      Write-Host ("Activated with: {0}" -f $content)
+      Speak-Safe -Text ("OK - I heard: {0}" -f $content)
+    } else {
+      Speak-Safe -Text "Jeg lytter..."
+    }
+    return
+  }
+
+  Write-Host "No wakeword"
+}
+
+# ===================== MAIN =====================
+if ($Test) {
+  Write-Host "TEST: running"
+  $tests = @(
+    "Hej Jarvis",
+    "Hey Jarvis - status?",
+    "Jarvis, taend lyset i garagen",
+    "jarvis?",
+    "intet wakeword her",
+    "Hej Jarvis kan du sige hej paa dansk"
+  )
+  foreach ($t in $tests) {
+    Write-Host "-----"
+    Write-Host ("TEST raw: {0}" -f $t)
+    Process-RawInput -raw $t
+  }
+  Write-Host "TEST: done"
+  exit 0
+}
+
+Write-Host "RUN: loop start (Ctrl+C to stop)"
+$lastProcessed = $null
+while ($true) {
+  try {
+    # Aktiv lytning: kør STT i korte ryk og processér seneste linje
+    $raw = Run-STT-Once -TimeoutSec $SttTimeoutSec
+    if ($raw -and $raw -ne $lastProcessed) {
+      $lastProcessed = $raw
+      Process-RawInput -raw $raw
+    }
+    Start-Sleep -Milliseconds 200
+  } catch {
+    Write-Host ("Loop error: " + $_.Exception.Message) -ForegroundColor Red
+    Start-Sleep -Milliseconds 400
+  }
+}
+
+
+
+
+
+

@@ -1,0 +1,14 @@
+name: Jarvis CI
+on:
+  push: { }
+  pull_request: { }
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run regression
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          pwsh -File tools/ci_regression.ps1

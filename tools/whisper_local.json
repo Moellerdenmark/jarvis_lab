@@ -1,0 +1,5 @@
+{
+  "exe": "C:\\Users\\gubbi\\scoop\\apps\\whisper-cpp\\current\\whisper-cli.exe",
+  "model": "C:\\Users\\gubbi\\jarvis_core\\tools\\models\\whisper\\ggml-small.bin",
+  "lang": "da"
+}

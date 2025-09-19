@@ -1,0 +1,134 @@
+# === OLLAMA DANISH WRAPPERS v4 ===
+
+function Invoke-OllamaGenerate {
+  param(
+    [Parameter(Mandatory)][string]$Model,
+    [Parameter(Mandatory)][string]$Prompt,
+    [int]$TimeoutMs = 120000,
+    [hashtable]$Options = @{ temperature=0.1; top_p=0.85; repeat_penalty=1.1; num_ctx=4096 },
+    [switch]$ReturnRaw
+  )
+  $base = $env:OLLAMA_HOST; if (-not $base) { $base = 'http://127.0.0.1:11434' }
+  $body = @{ model=$Model; stream=$false; prompt=$Prompt; options=$Options } | ConvertTo-Json -Depth 10
+  $resp = Invoke-RestMethod -Uri "$base/api/generate" -Method Post -ContentType 'application/json' -Body $body -TimeoutSec ([math]::Ceiling($TimeoutMs/1000))
+  if ($ReturnRaw) { return $resp }
+  return ($resp.response ?? '')
+}
+
+# Dansk korrektur (bevar indhold, ret sprog/ordvalg)
+function da_fix {
+  [CmdletBinding()]
+  param(
+    [Parameter(Mandatory)][string]$Text,
+    [string]$Model = 'llama3.1:8b',
+    [int]$TimeoutMs = 60000
+  )
+  $repl = @{
+    'taglyslampe'    = 'loftbelysning'
+    'taglyse'        = 'loftlampe'
+    'lysforrentning' = 'belysning'
+    'væggelementer'  = 'vægarmaturer'
+    'gulvlyse'       = 'gulvlys'
+    'garaget'        = 'garagen'
+  }
+  $clean = $Text
+  foreach($k in $repl.Keys){ $clean = $clean -replace [regex]::Escape($k), $repl[$k] }
+
+  $sys = "Du er korrekturlæser på dansk. Ret stavefejl og uheldige ordvalg; erstat opdigtede ord med naturlige danske fagtermer. Bevar indhold og struktur. Ingen hilsener."
+  $prompt = "System: $sys`nUser: Ret følgende til korrekt, flydende dansk (uden at ændre indholdet):`n$clean`nAssistant:"
+  Invoke-OllamaGenerate -Model $Model -Prompt $prompt -TimeoutMs $TimeoutMs -Options @{ temperature=0.05; top_p=0.9; num_ctx=4096 }
+}
+
+# Hjælp: tag de første N punktopstillinger hvis der kom ekstra fyld
+function Select-FirstBullets {
+  param([string]$Text,[int]$N=3)
+  $lines = $Text -split "`r?`n"
+  $bul = @()
+  foreach($l in $lines){
+    if ($l -match '^\s*(?:[-*•]|[0-9]+\.)\s'){
+      $bul += ($l.Trim())
+      if ($bul.Count -eq $N){ break }
+    }
+  }
+  if ($bul.Count -eq $N){ return ($bul -join "`n") }
+  return $Text
+}
+
+# Generel dansk systemprompt (ingen domæneord)
+$Global:__DK_SYS_GENERAL = @"
+Skriv på flydende, korrekt dansk (rigsdansk).
+Svar kort og præcist. Ingen hilsener. Ingen engelske låneord. Ingen opdigtede ord.
+Svar kun på det, der bliver spurgt – ingen ekstra råd eller afsnit.
+"@
+
+function askdk_mini {
+  [CmdletBinding()]
+  param(
+    [Parameter(Position=0, ValueFromRemainingArguments=$true)][string[]]$Text,
+    [int]$TimeoutMs = 60000,
+    [string]$Model = 'llama3.1:8b'
+  )
+  $promptUser = ($Text -join ' ').Trim()
+
+  # Special-case: "hej fra jarvis" → præcis tekst
+  if ($promptUser -match '^\s*(skriv\s+)?hej fra jarvis' -i) {
+    $final = 'Hej fra Jarvis'
+    $root='C:\Users\gubbi\jarvis_core'; $out=Join-Path (Join-Path $root 'out') 'chatgpt_last.txt'
+    if (-not (Test-Path (Split-Path $out))) { New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null }
+    $final | Set-Content -Path $out -Encoding UTF8
+    return $final
+  }
+
+  $full = "System: $Global:__DK_SYS_GENERAL`nUser: $promptUser`nAssistant:"
+  $raw  = Invoke-OllamaGenerate -Model $Model -Prompt $full -TimeoutMs $TimeoutMs -Options @{ temperature=0.08; top_p=0.9; num_ctx=4096; stop=@('System:','User:','Assistant:') }
+  $final = da_fix -Text $raw -Model $Model -TimeoutMs ([Math]::Min($TimeoutMs,90000))
+
+  $root='C:\Users\gubbi\jarvis_core'; $out=Join-Path (Join-Path $root 'out') 'chatgpt_last.txt'
+  if (-not (Test-Path (Split-Path $out))) { New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null }
+  $final | Set-Content -Path $out -Encoding UTF8
+  return $final
+}
+
+function askdk_pro {
+  [CmdletBinding()]
+  param(
+    [Parameter(Position=0, ValueFromRemainingArguments=$true)][string[]]$Text,
+    [int]$TimeoutMs = 120000,
+    [string]$Model = 'llama3.1:8b'
+  )
+  $promptUser = ($Text -join ' ')
+
+  $rules = @"
+Regler:
+- Giv præcis 3 punktopstillinger. Ingen andre linjer før eller efter.
+- Kort, praktisk sprog. Ingen hilsener eller ekstra forslag.
+"@
+
+  $styleUser = "Giv 3 konkrete idéer til LED-lys i en 18 m² garage. Skriv kort og praktisk."
+  $styleAss  = @"
+- Loftpaneler – 2× LED-loftpanel 120×30 cm, ~36–40 W og ~3.600–4.000 lm pr. panel, 4.000 K. Montér i to baner for jævn belysning.
+- Arbejdsbord/værktøjstavle – LED-lyslister i alu-profil med mat diffuser, 24 V, ~1.000–1.500 lm/m, 4.000 K. Vinklet profil for at undgå blænding.
+- Orientering – kort LED-strip (24 V) i alu-profil ved port/reoler. PIR-sensor tænder automatisk; lavt komfortlys.
+"@
+
+  $full = @"
+System: $Global:__DK_SYS_GENERAL
+$rules
+[STYLE_EXAMPLE_START]
+User: $styleUser
+Assistant:
+$styleAss
+[STYLE_EXAMPLE_END]
+User: $promptUser
+Assistant:
+"@
+
+  $raw = Invoke-OllamaGenerate -Model $Model -Prompt $full -TimeoutMs $TimeoutMs -Options @{ temperature=0.08; top_p=0.85; repeat_penalty=1.1; num_ctx=4096; stop=@('System:','User:','Assistant:','[STYLE_EXAMPLE_START]','[STYLE_EXAMPLE_END]') }
+  $fixed = da_fix -Text $raw -Model $Model -TimeoutMs ([Math]::Min($TimeoutMs,90000))
+  $final = Select-FirstBullets -Text $fixed -N 3
+
+  $root='C:\Users\gubbi\jarvis_core'; $out=Join-Path (Join-Path $root 'out') 'chatgpt_last.txt'
+  if (-not (Test-Path (Split-Path $out))) { New-Item -ItemType Directory -Force -Path (Split-Path $out) | Out-Null }
+  $final | Set-Content -Path $out -Encoding UTF8
+  return $final
+}

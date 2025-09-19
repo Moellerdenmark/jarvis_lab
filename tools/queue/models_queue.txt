@@ -1,0 +1,1 @@
+.ToLower() | ForEach-Object { $_.name } 

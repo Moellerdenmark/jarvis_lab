@@ -1,0 +1,12 @@
+# Simple, sikre skills. Regex -> PowerShell handling.
+- name: Åbn projektmappe
+  match: '(?i)\b(åbn|vis)\s+(jarvis[_\s-]?core|projektmappe)\b'
+  run:   'Start-Process "C:\Users\gubbi\jarvis_core"'
+
+- name: Vis klokkeslæt
+  match: '(?i)\b(hvad er klokken|klokken|time)\b'
+  run:   '$t = Get-Date -Format "HH:mm"; & "$PSScriptRoot\say.ps1" -Text "Klokken er $t"'
+
+- name: Start Docker Desktop
+  match: '(?i)\b(start|åbn)\s+(docker|docker desktop)\b'
+  run:   'Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"'

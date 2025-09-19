@@ -1,0 +1,156 @@
+param(
+  [switch]$Test,
+  [string]$SttCmd = "C:\Users\gubbi\jarvis_core\tools\stt.ps1",
+  [string]$TtsCmd = "C:\Users\gubbi\jarvis_core\tools\speak.ps1",
+  [int]$SttTimeoutSec = 8,
+  [int]$TtsTimeoutSec = 8,
+  [string]$SttFile = "C:\Users\gubbi\jarvis_core\out\listen\last_stt.txt",
+  [string]$Voice = "jarvis",
+  [int]$Rate = 0,
+  [int]$Volume = 100
+)
+
+# ==== Wakeword-regex (enkeltlinjet) ====
+$global:RE_WAKEWORD_ONLY = "^(?i)\s*(hej|hey)\s+jarvis\s*[?.!,:;\-]*\s*$"
+$global:RE_JARVIS_ONLY   = "^(?i)\s*jarvis\s*[?.!,:;\-]*\s*$"
+
+function Invoke-WithTimeout {
+  param(
+    [scriptblock]$Script,
+    [int]$TimeoutSec = 8,
+    [object[]]$Args
+  )
+  try {
+    $job = Start-Job -ScriptBlock $Script -ArgumentList $Args
+    if (-not (Wait-Job -Job $job -Timeout $TimeoutSec)) {
+      Stop-Job -Job $job -ErrorAction SilentlyContinue
+      Remove-Job -Job $job -ErrorAction SilentlyContinue
+      return $false,$null,"timeout"
+    }
+    $out = Receive-Job -Job $job -Keep
+    $err = ($job.ChildJobs | ForEach-Object { $_.Error }) -join "`n"
+    Remove-Job -Job $job -ErrorAction SilentlyContinue
+    return $true,($out -join "`n"),$err
+  } catch {
+    return $false,$null,$_.Exception.Message
+  }
+}
+
+function Speak-Safe {
+  param(
+    [Parameter(Mandatory=$true)][string]$Text,
+    [string]$Voice = $Voice,
+    [int]$Rate = $Rate,
+    [int]$Volume = $Volume,
+    [int]$TimeoutSec = $TtsTimeoutSec
+  )
+  if (Test-Path $TtsCmd) {
+    $sb = { param($pText,$pVoice,$pRate,$pVol,$pCmd) & $pCmd -Text $pText -Voice $pVoice -Rate $pRate -Volume $pVol }
+    $ok,$o,$e = Invoke-WithTimeout -Script $sb -TimeoutSec $TimeoutSec -Args @($Text,$Voice,$Rate,$Volume,$TtsCmd)
+    if (-not $ok) {
+      Write-Host "TTS error/timeout: $e" -ForegroundColor Yellow
+      Write-Host "TTS(dummy): $Text"
+    }
+  } else {
+    Write-Host "TTS path not found: $TtsCmd" -ForegroundColor Yellow
+    Write-Host "TTS(dummy): $Text"
+  }
+}
+
+function Get-NextUtterance {
+  param([int]$TimeoutSec = $SttTimeoutSec)
+
+  if (-not (Test-Path $SttCmd)) {
+    Write-Host "STT path not found: $SttCmd" -ForegroundColor Red
+    return $null
+  }
+
+  # Kør STT (optag+transskriber)
+  $sb = { param($pCmd) & $pCmd }
+  $ok,$out,$err = Invoke-WithTimeout -Script $sb -TimeoutSec $TimeoutSec -Args @($SttCmd)
+  if (-not $ok) {
+    Write-Host "STT error/timeout: $err" -ForegroundColor Yellow
+    return $null
+  }
+
+  # Læs seneste tekst og vælg sidste linje, som IKKE kun er wakeword
+  $txt = if (Test-Path $SttFile) { Get-Content -LiteralPath $SttFile -Raw -ErrorAction SilentlyContinue } else { $null }
+  if (-not $txt) { return $null }
+
+  $lines = $txt -split "`r?`n"
+  for ($i = $lines.Length - 1; $i -ge 0; $i--) {
+    $ln = $lines[$i].Trim()
+    if (-not $ln) { continue }
+    if ($ln -match $global:RE_WAKEWORD_ONLY) { continue }
+    if ($ln -match $global:RE_JARVIS_ONLY)   { continue }
+    return $ln
+  }
+  return $null
+}
+
+function Process-RawInput {
+  param([string]$raw)
+
+  Write-Host "DBG raw: $raw"
+  # Kun wakeword?
+  if ($raw -match $global:RE_WAKEWORD_ONLY -or $raw -match $global:RE_JARVIS_ONLY) {
+    Speak-Safe -Text "Jeg lytter..."
+    Write-Host "Wakeword -> start STT"
+    $next = Get-NextUtterance
+    if ($null -eq $next -or $next -match $global:RE_WAKEWORD_ONLY -or $next -match $global:RE_JARVIS_ONLY) {
+      return
+    }
+    Speak-Safe -Text ("OK - I heard: {0}" -f $next)
+    return
+  }
+
+  # Wakeword + indhold (fx: "Hey Jarvis - status?")
+  if ($raw -match "(?i)\b(hej|hey)\s+jarvis\b") {
+    $content = ($raw -replace "(?i)\b(hej|hey)\s+jarvis\b", "").Trim(" -–—:;,.!?`" '")
+    if ($content) {
+      Write-Host ("Activated with: {0}" -f $content)
+      Speak-Safe -Text ("OK - I heard: {0}" -f $content)
+    } else {
+      Speak-Safe -Text "Jeg lytter..."
+    }
+    return
+  }
+
+  Write-Host "No wakeword"
+}
+
+# ===== MAIN =====
+if ($Test) {
+  Write-Host "TEST: running"
+  $tests = @(
+    "Hej Jarvis",
+    "Hey Jarvis - status?",
+    "Jarvis, taend lyset i garagen",
+    "jarvis?",
+    "intet wakeword her",
+    "Hej Jarvis kan du sige hej paa dansk"
+  )
+  foreach ($t in $tests) {
+    Write-Host "-----"
+    Write-Host ("TEST raw: {0}" -f $t)
+    Process-RawInput -raw $t
+  }
+  Write-Host "TEST: done"
+  exit 0
+}
+
+Write-Host "RUN: loop start (Ctrl+C to stop)"
+while ($true) {
+  try {
+    # Læs én linje fra lytteren (her antager vi ét input ad gangen – udvid evt. med real mic pipeline)
+    # For nu bruger vi STT-filen som "kø": Process-RawInput er robust overfor wakeword-only
+    if (Test-Path $SttFile) {
+      $last = (Get-Content -LiteralPath $SttFile -ErrorAction SilentlyContinue | Select-Object -Last 1)
+      if ($last) { Process-RawInput -raw $last }
+    }
+    Start-Sleep -Milliseconds 300
+  } catch {
+    Write-Host ("Loop error: " + $_.Exception.Message) -ForegroundColor Red
+    Start-Sleep -Milliseconds 400
+  }
+}

@@ -1,0 +1,86 @@
+param(
+  [string]$SttCmd = ".\tools\stt_da.ps1",
+  [string]$TtsCmd = ".\tools\speak.ps1",
+  [string]$DeviceName = "Microphone (Jabra SPEAK 510 USB)",
+  [int]$ListenSeconds = 8
+)
+
+$ErrorActionPreference = 'Stop'
+Write-Host "RUN: hotword loop (Ctrl+C to stop)"
+
+function Normalize-DA {
+  param([string]$s)
+  if (-not $s) { return "" }
+  $s = ($s -replace "^(?i)\s*(hej|hey)?\s*jarvis[,!\s]*","")  # fjern Hej/Hey + Jarvis (valgfrit)
+  $s = ($s -replace "\s+"," ")
+  return $s.Trim()
+}
+  $s = ($s -replace "(?i)^(hej|hey)\s+jarvis[,!\s]*","").Trim()
+  $s = ($s -replace "\s+"," ").Trim()
+  return $s
+}
+
+while ($true) {
+  try {
+    [console]::Beep(1000,120)
+
+    # Kald wrapperen som både optager og kører STT (skal returnere tekst på stdout)
+    $heard = & .\tools\stt_mic_wrapper.ps1 -Seconds $ListenSeconds -DeviceName $DeviceName -SttCmd $SttCmd 2>&1
+    $heard = ($heard | Out-String).Trim()
+
+    if (-not $heard) {
+      Write-Host "HEARD: (tom)" -ForegroundColor DarkGray
+      Start-Sleep -Milliseconds 200
+      continue
+    }
+
+    Write-Host "HEARD: $heard" -ForegroundColor Cyan
+$cmd = Normalize-DA $heard; Write-Host ("CMD: " + $cmd) -ForegroundColor DarkGray
+    if ($cmd -match '(?i)\b(tænd|taend)\b.*\blys(?:et|ene)?\b.*\b(stue|stuen)\b') {
+      & $TtsCmd -Text "Tænder lyset i stuen." -VoiceName Helle -Rate 1.5
+      continue
+    }
+    elseif ($cmd -match '(?i)\b(sluk)\b.*\blys(?:et|ene)?\b.*\b(stue|stuen)\b') {
+      & $TtsCmd -Text "Slukker lyset i stuen." -VoiceName Helle -Rate 1.5
+      continue
+    }
+    elseif ($cmd -match '(?i)\bkan du h(ø|o)re mig\b') {
+      & $TtsCmd -Text "Ja, jeg kan høre dig." -VoiceName Helle -Rate 1.5
+      continue
+    }
+    else {
+      & $TtsCmd -Text "Du sagde: $cmd" -VoiceName Helle -Rate 1.2
+    }
+
+    Start-Sleep -Milliseconds 200
+  }
+  catch {
+    Write-Warning $_
+    Start-Sleep -Seconds 1
+  }
+}
+
+
+
+function Handle-Intent {
+  param([string]$Text)
+  if (-not $Text) { return $false }
+  $t = $Text.Trim(".!?,;: ").ToLower()
+
+  if ($t -match '\b(tænd|taend)\b.*\blys(?:et|ene)?\b.*\b(stue|stuen)\b') {
+    Write-Host "INTENT: TÆND" -ForegroundColor Green
+    & $TtsCmd -Text "Tænder lyset i stuen." -VoiceName Helle -Rate 1.5
+    return $true
+  }
+  if ($t -match '\bsluk\b.*\blys(?:et|ene)?\b.*\b(stue|stuen)\b') {
+    Write-Host "INTENT: SLUK" -ForegroundColor Yellow
+    & $TtsCmd -Text "Slukker lyset i stuen." -VoiceName Helle -Rate 1.5
+    return $true
+  }
+  if ($t -match '\bkan du h(?:ø|o)re mig\b') {
+    Write-Host "INTENT: HEAR" -ForegroundColor Cyan
+    & $TtsCmd -Text "Ja, jeg kan høre dig." -VoiceName Helle -Rate 1.5
+    return $true
+  }
+  return $false
+}

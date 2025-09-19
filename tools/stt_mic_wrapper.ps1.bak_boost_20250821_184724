@@ -1,0 +1,97 @@
+param(
+  [Alias('ListenSeconds')][int]$Seconds = 6,
+  [string]$Device,
+  [string]$DeviceName,
+  [switch]$ListDevices,
+  [string]$SttCmd
+)
+
+$ErrorActionPreference = 'Stop'
+if (-not $PSScriptRoot) { $PSScriptRoot = (Split-Path -Parent $MyInvocation.MyCommand.Path); if (-not $PSScriptRoot){ $PSScriptRoot = (Get-Location).Path } }
+if (-not $SttCmd) { $SttCmd = Join-Path $PSScriptRoot 'stt.ps1' }
+
+# ===== helper: skriv status til STDERR (ikke STDOUT) =====
+function Status([string]$s){ [Console]::Error.WriteLine($s) }
+
+# Stier
+$RootDir  = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$OutDir   = [IO.Path]::GetFullPath((Join-Path $RootDir 'out\listen'))
+$InWav    = Join-Path $OutDir 'jarvis_in.wav'
+$BoostWav = Join-Path $OutDir 'jarvis_in_boosted.wav'
+$SttFile  = Join-Path $OutDir 'last_stt.txt'
+$null = New-Item -ItemType Directory -Force -Path $OutDir -ErrorAction SilentlyContinue
+
+function Get-FFmpegPath {
+  $ff = (Get-Command ffmpeg -ErrorAction SilentlyContinue)?.Source
+  if ($ff) { return $ff }
+  $local = Join-Path $PSScriptRoot '..\ffmpeg\bin\ffmpeg.exe'
+  if (Test-Path $local) { return $local }
+  throw "ffmpeg ikke fundet."
+}
+
+function Show-DShowDevices([string]$FfmpegPath){
+  Status "=== DirectShow-enheder (brug præcis teksten i anførselstegn) ==="
+  & $FfmpegPath -hide_banner -list_devices true -f dshow -i dummy 2>&1 |
+    Where-Object { $_ -match 'DirectShow audio devices|\"' } | ForEach-Object { Status $_ }
+  Status "================================================================"
+}
+
+function Wait-ForFile([string]$Path,[int]$msTimeout=60000){
+  $t0 = Get-Date
+  while(((Get-Date)-$t0).TotalMilliseconds -lt $msTimeout){
+    if(Test-Path $Path){
+      try{
+        $len = (Get-Item $Path).Length
+        if($len -gt 0){ return $true }
+      }catch{}
+    }
+    Start-Sleep -Milliseconds 150
+  }
+  return $false
+}
+
+$ff = Get-FFmpegPath
+if ($ListDevices) { Show-DShowDevices $ff; return }
+
+# find device
+$dname = if ($PSBoundParameters.ContainsKey('Device')) { $Device } elseif ($PSBoundParameters.ContainsKey('DeviceName')) { $DeviceName } else { $null }
+if (-not $dname) {
+  $probe = & $ff -hide_banner -list_devices true -f dshow -i dummy 2>&1
+  $auto  = ($probe | Where-Object { $_ -match 'Jabra SPEAK 510' } | Select-Object -First 1)
+  if ($auto) { $dname = ($auto -replace '.*\"(.*)\".*','$1') } else { Show-DShowDevices $ff; throw 'Kør igen med -DeviceName "Microphone (Jabra SPEAK 510 USB)".' }
+}
+
+# optag
+Status ("REC: optager {0}s fra ""{1}"" -> {2}" -f $Seconds, $dname, $InWav)
+& $ff -hide_banner -loglevel error -y `
+  -f dshow -guess_layout_max 0 -i ("audio=" + $dname) `
+  -ac 1 -ar 16000 -t $Seconds -c:a pcm_s16le $InWav
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $InWav)) { throw "Mikrofonoptagelse fejlede." }
+
+# boost
+Status ("REC: normaliserer -> {0}" -f $BoostWav)
+& $ff -hide_banner -loglevel error -y `
+  -i $InWav -ac 1 -ar 16000 -sample_fmt s16 `
+  -af "highpass=f=80,lowpass=f=7500,afftdn=nr=20,acompressor=threshold=-27dB:ratio=5:attack=5:release=100,dynaudnorm=f=250:g=7,volume=10dB,loudnorm=I=-16:LRA=7:TP=-1.5" `
+  $BoostWav
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $BoostWav)) { throw "Kunne ikke producere $BoostWav" }
+
+# nulstil evt. gammel transkript
+Remove-Item -LiteralPath $SttFile -Force -ErrorAction SilentlyContinue
+
+# Kald STT i 'listen' (din STT læser jarvis_in_boosted.wav)
+Status "[WRAP] Kalder STT (mode=listen)..."
+$null = & pwsh -NoProfile -ExecutionPolicy Bypass -File $SttCmd -Mode listen 2>&1 | Out-String
+
+# vent op til 60 sek.
+$ok = Wait-ForFile -Path $SttFile -msTimeout 60000
+if (-not $ok) { Status "WARNING: STT-filen blev ikke fundet."; return }
+
+# KUN rå tekst til STDOUT
+$t = (Get-Content -LiteralPath $SttFile -Raw -Encoding utf8) -replace "^\uFEFF",""
+$t = $t.Trim()
+if (-not $t) { Status "WARNING: STT-filen er tom."; return }
+
+$t | Write-Output
+
+

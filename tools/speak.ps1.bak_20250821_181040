@@ -1,0 +1,54 @@
+param(
+  [Parameter(Mandatory=$true)][string]$Text,
+  [int]$Rate = 0,
+  [int]$Volume = 100,
+  [string]$VoiceName # valgfrit: fx "Helle" eller "Microsoft Helle"
+)
+
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding          = [System.Text.Encoding]::UTF8
+
+function Use-SAPI {
+  param([string]$Text,[int]$Rate,[int]$Volume,[string]$VoiceName)
+
+  $sp = New-Object -ComObject SAPI.SpVoice
+  $voices = @($sp.GetVoices())
+  $pick = $null
+
+  if ($VoiceName) {
+    $pick = $voices | Where-Object { $_.GetDescription() -like "*$VoiceName*" } | Select-Object -First 1
+  }
+
+  if (-not $pick) {
+    # prøv at finde dansk stemme
+    $pick = $voices | Where-Object {
+      $_.GetDescription() -match 'da-DK|Danish|Helle'
+    } | Select-Object -First 1
+  }
+
+  if ($pick) { $sp.Voice = $pick }
+  $sp.Rate   = $Rate
+  $sp.Volume = $Volume
+  [void]$sp.Speak($Text, 0)
+}
+
+try {
+  Use-SAPI -Text $Text -Rate $Rate -Volume $Volume -VoiceName $VoiceName
+}
+catch {
+  # Faldbak: System.Speech (.NET) via Windows PowerShell 5
+  powershell -NoProfile -Command @"
+Add-Type -AssemblyName System.Speech
+\$s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+if ('$VoiceName' -ne '') {
+  \$v = \$s.GetInstalledVoices() | Where-Object { \$_.VoiceInfo.Name -like '*$VoiceName*' } | Select-Object -First 1
+  if (\$v) { \$s.SelectVoice(\$v.VoiceInfo.Name) }
+} else {
+  \$v = \$s.GetInstalledVoices() | Where-Object { \$_.VoiceInfo.Culture.Name -like 'da-*' -or \$_.VoiceInfo.Name -match 'Helle|Danish' } | Select-Object -First 1
+  if (\$v) { \$s.SelectVoice(\$v.VoiceInfo.Name) }
+}
+\$s.Rate = $Rate; \$s.Volume = $Volume
+\$s.Speak([string]::Copy('$Text'))
+"@
+}

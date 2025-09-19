@@ -1,0 +1,24 @@
+param(
+  [string]$WavIn = "C:\Users\gubbi\jarvis_core\out\listen\jarvis_in_boosted.wav",
+  [string]$ModelId = "small"
+)
+
+$ErrorActionPreference = "Stop"
+
+$Root   = "C:\Users\gubbi\jarvis_core"
+$Py     = Join-Path $Root ".venv\Scripts\python.exe"
+$OutDir = Join-Path $Root "out\listen"
+
+Write-Host "[STT] Transskriberer $WavIn med model '$ModelId'..." -ForegroundColor Cyan
+
+& $Py -m faster_whisper.transcribe `
+   --model_id $ModelId `
+   --device cpu `
+   --compute_type int8 `
+   --language da `
+   --output_dir $OutDir `
+   $WavIn
+
+if (Test-Path (Join-Path $OutDir "last_stt.txt")) {
+   Write-Host "OK: $(Join-Path $OutDir 'last_stt.txt')" -ForegroundColor Green
+}
