@@ -6,3 +6,4 @@ queue/
 tools/hello*.ps1
 tools/rt_*.ps1
 tools/fil.ps1
+voices/*.wav
