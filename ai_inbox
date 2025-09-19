@@ -1,0 +1,8 @@
+# media_cam_2104_motion_detect
+Goal: Motion-detektion (scene change) og event-JSON.
+Plan:
+- Opret tools\camera\motion_detect.ps1 (param: -Cam -Thresh 0.10 -WindowSec 2)
+- ffmpeg med filter 'select=gt(scene,Thresh),metadata=print' -> parse til event med timecode.
+- Skriv events til out\camera\events\<cam>\YYYYMMDD.jsonl (fields: time, score, frame).
+Acceptance:
+- Bevægelser giver entries i JSONL for valgt kamera.

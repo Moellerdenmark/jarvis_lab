@@ -1,9 +1,20 @@
-tools/models/*
-!tools/models/**/*.bin
-!tools/models/.gitkeep
-__tools__/
-queue/
-tools/hello*.ps1
-tools/rt_*.ps1
-tools/fil.ps1
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Python/node/rust etc (hvis relevant)
+__pycache__/
+node_modules/
+
+# Lokale LAB ting
+ai_inbox/
+ai_tasks/_working/
+quarantine/
+logs/
+metrics/
+
+# Store filer
 voices/*.wav
+tools/*.wav

@@ -1,0 +1,15 @@
+{
+  "steps": [
+    {
+      "text": "ping 14:25:36",
+      "path": "out\\smoke.txt",
+      "type": "append_line"
+    },
+    {
+      "content": "file_write OK",
+      "path": "out\\filewrite_ok.txt",
+      "type": "file_write"
+    }
+  ],
+  "type": "orchestrate"
+}
