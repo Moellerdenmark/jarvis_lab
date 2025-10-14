@@ -1,0 +1,12 @@
+name: Jarvis CI
+on:
+  pull_request:
+    branches: [autopilot_main]
+  workflow_dispatch:
+jobs:
+  sanity:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sanity
+        run: echo OK
